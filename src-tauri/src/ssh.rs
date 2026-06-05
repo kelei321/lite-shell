@@ -55,7 +55,6 @@ pub fn ssh_connect(
 ) -> Result<String, String> {
     let id = Uuid::new_v4().to_string();
     let session = create_session(&payload).map_err(|error| error.to_string())?;
-    session.set_blocking(false);
 
     let mut channel = session
         .channel_session()
@@ -72,6 +71,8 @@ pub fn ssh_connect(
     channel
         .shell()
         .map_err(|error| format!("start shell failed: {error}"))?;
+
+    session.set_blocking(false);
 
     let handle = Arc::new(SshHandle {
         channel: Mutex::new(channel),

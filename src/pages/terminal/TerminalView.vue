@@ -3,43 +3,73 @@
     <header class="toolbar">
       <div>
         <h2>SSH 终端</h2>
-        <p>第一版密码不落盘，关闭连接后会释放 SSH session。</p>
+        <p>主机信息本地保存，密码不落盘；关闭标签页会自动释放 SSH session。</p>
       </div>
-      <div class="status" :class="{ 'status--online': isConnected }">
-        {{ isConnected ? '已连接' : '未连接' }}
+      <div class="status" :class="{ 'status--online': activeTab?.sessionId }">
+        {{ activeTab ? activeTab.statusText : '无会话' }}
       </div>
     </header>
 
     <div class="content-grid">
-      <form class="connect-card" @submit.prevent="connect">
-        <label>
-          <span>主机</span>
-          <input v-model.trim="form.host" autocomplete="off" placeholder="127.0.0.1" />
-        </label>
+      <aside class="host-panel">
+        <form class="connect-card" @submit.prevent="saveAndConnect">
+          <div class="panel-title-row">
+            <h3>主机配置</h3>
+            <button class="tiny-button" type="button" @click="resetForm">新增</button>
+          </div>
 
-        <label>
-          <span>端口</span>
-          <input v-model.number="form.port" min="1" max="65535" type="number" />
-        </label>
+          <label>
+            <span>名称</span>
+            <input v-model.trim="form.name" autocomplete="off" placeholder="生产服务器" />
+          </label>
 
-        <label>
-          <span>用户名</span>
-          <input v-model.trim="form.username" autocomplete="username" placeholder="root" />
-        </label>
+          <label>
+            <span>主机</span>
+            <input v-model.trim="form.host" autocomplete="off" placeholder="127.0.0.1" />
+          </label>
 
-        <label>
-          <span>密码</span>
-          <input v-model="form.password" autocomplete="current-password" type="password" />
-        </label>
+          <label>
+            <span>端口</span>
+            <input v-model.number="form.port" min="1" max="65535" type="number" />
+          </label>
 
-        <div class="action-row">
-          <button class="primary-button" :disabled="connecting || isConnected" type="submit">
-            {{ connecting ? '连接中...' : '连接' }}
+          <label>
+            <span>用户名</span>
+            <input v-model.trim="form.username" autocomplete="username" placeholder="root" />
+          </label>
+
+          <label>
+            <span>密码</span>
+            <input v-model="form.password" autocomplete="current-password" type="password" />
+          </label>
+
+          <div class="action-row">
+            <button class="primary-button" :disabled="!canConnect || connecting" type="submit">
+              {{ connecting ? '连接中...' : '保存并连接' }}
+            </button>
+            <button class="ghost-button" :disabled="!canSave" type="button" @click="saveHost">
+              保存
+            </button>
+          </div>
+        </form>
+
+        <section class="host-list-card">
+          <h3>主机列表</h3>
+          <p v-if="hostStore.sortedHosts.length === 0" class="empty-tip">
+            暂无主机，填写上方表单后点击保存。
+          </p>
+
+          <button
+            v-for="host in hostStore.sortedHosts"
+            :key="host.id"
+            class="host-item"
+            type="button"
+            @click="selectHost(host)"
+          >
+            <span class="host-item__name">{{ host.name }}</span>
+            <span class="host-item__meta">{{ host.username }}@{{ host.host }}:{{ host.port }}</span>
           </button>
-          <button class="ghost-button" :disabled="!isConnected" type="button" @click="close">
-            断开
-          </button>
-        </div>
+        </section>
 
         <section class="quick-card">
           <h3>快捷命令</h3>
@@ -47,28 +77,61 @@
             v-for="command in quickCommands"
             :key="command"
             class="command-button"
-            :disabled="!isConnected"
+            :disabled="!activeTab?.sessionId"
             type="button"
             @click="sendCommand(command)"
           >
             {{ command }}
           </button>
         </section>
-      </form>
+      </aside>
 
-      <div class="terminal-card">
-        <div ref="terminalEl" class="terminal-host"></div>
-      </div>
+      <section class="workspace-card">
+        <div class="tabs-bar">
+          <button
+            v-for="tab in tabs"
+            :key="tab.id"
+            class="tab-item"
+            :class="{ 'tab-item--active': tab.id === activeTabId }"
+            type="button"
+            @click="activateTab(tab.id)"
+          >
+            <span>{{ tab.title }}</span>
+            <span class="tab-dot" :class="{ 'tab-dot--online': tab.sessionId }"></span>
+            <span class="tab-close" @click.stop="closeTab(tab.id)">×</span>
+          </button>
+
+          <span v-if="tabs.length === 0" class="empty-tabs">暂无终端标签页</span>
+        </div>
+
+        <div class="terminal-card">
+          <div
+            v-for="tab in tabs"
+            :key="tab.id"
+            :ref="(el) => setTerminalHost(tab.id, el)"
+            class="terminal-host"
+            v-show="tab.id === activeTabId"
+          ></div>
+
+          <div v-if="tabs.length === 0" class="welcome-card">
+            <h3>LiteShell ready</h3>
+            <p>选择或新增一个主机，输入密码后点击“保存并连接”。</p>
+            <p>密码只用于本次连接，不会写入 localStorage。</p>
+          </div>
+        </div>
+      </section>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
+
+import { type HostProfile, useHostStore } from '@/stores/hosts';
 
 import '@xterm/xterm/css/xterm.css';
 
@@ -77,26 +140,189 @@ interface SshDataPayload {
   data: string;
 }
 
+interface TerminalTab {
+  id: string;
+  hostId: string;
+  title: string;
+  host: string;
+  port: number;
+  username: string;
+  sessionId: string;
+  connecting: boolean;
+  statusText: string;
+  terminal?: Terminal;
+  fitAddon?: FitAddon;
+  lastCols?: number;
+  lastRows?: number;
+}
+
+const hostStore = useHostStore();
+const quickCommands = ['pwd', 'ls -la', 'df -h', 'free -m', 'top'];
+
 const form = reactive({
+  id: '',
+  name: '',
   host: '127.0.0.1',
   port: 22,
   username: 'root',
   password: '',
 });
 
-const quickCommands = ['pwd', 'ls -la', 'df -h', 'free -m', 'top'];
-const terminalEl = ref<HTMLDivElement>();
-const sessionId = ref('');
+const tabs = ref<TerminalTab[]>([]);
+const activeTabId = ref('');
 const connecting = ref(false);
-const isConnected = computed(() => Boolean(sessionId.value));
+const terminalHosts = new Map<string, HTMLDivElement>();
 
-let terminal: Terminal | undefined;
-let fitAddon: FitAddon | undefined;
-let resizeObserver: ResizeObserver | undefined;
+const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value));
+const canSave = computed(() => Boolean(form.host.trim() && form.username.trim()));
+const canConnect = computed(() => Boolean(canSave.value && form.password));
+
 let unlisten: UnlistenFn | undefined;
 
 onMounted(async () => {
-  terminal = new Terminal({
+  unlisten = await listen<SshDataPayload>('ssh:data', (event) => {
+    const tab = tabs.value.find((item) => item.sessionId === event.payload.id);
+    tab?.terminal?.write(event.payload.data);
+  });
+
+  window.addEventListener('resize', handleWindowResize);
+});
+
+onBeforeUnmount(() => {
+  unlisten?.();
+  window.removeEventListener('resize', handleWindowResize);
+
+  for (const tab of tabs.value) {
+    if (tab.sessionId) {
+      void invoke('ssh_close', { id: tab.sessionId });
+    }
+    tab.terminal?.dispose();
+  }
+});
+
+function resetForm() {
+  form.id = '';
+  form.name = '';
+  form.host = '127.0.0.1';
+  form.port = 22;
+  form.username = 'root';
+  form.password = '';
+}
+
+function selectHost(host: HostProfile) {
+  form.id = host.id;
+  form.name = host.name;
+  form.host = host.host;
+  form.port = host.port;
+  form.username = host.username;
+  form.password = '';
+}
+
+function saveHost() {
+  if (!canSave.value) return undefined;
+
+  const host = hostStore.upsertHost({
+    id: form.id || undefined,
+    name: form.name,
+    host: form.host,
+    port: form.port,
+    username: form.username,
+  });
+
+  if (host) selectHost(host);
+  return host;
+}
+
+async function saveAndConnect() {
+  if (!canConnect.value || connecting.value) return;
+
+  const password = form.password;
+  const host = saveHost();
+  if (!host) return;
+
+  hostStore.touchHost(host.id);
+  form.password = '';
+
+  await openTerminalTab(host, password);
+}
+
+async function openTerminalTab(host: HostProfile, password: string) {
+  const tab: TerminalTab = {
+    id: createId(),
+    hostId: host.id,
+    title: host.name,
+    host: host.host,
+    port: host.port,
+    username: host.username,
+    sessionId: '',
+    connecting: true,
+    statusText: '连接中',
+  };
+
+  tabs.value.push(tab);
+  activeTabId.value = tab.id;
+  connecting.value = true;
+
+  await nextTick();
+  ensureTerminal(tab);
+  await connectTab(tab, password);
+}
+
+async function connectTab(tab: TerminalTab, password: string) {
+  const terminal = tab.terminal;
+  if (!terminal) return;
+
+  terminal.clear();
+  terminal.writeln(`Connecting to ${tab.username}@${tab.host}:${tab.port} ...`);
+
+  try {
+    fitVisibleTab(tab, { resizeRemote: false });
+
+    const sessionId = await invoke<string>('ssh_connect', {
+      payload: {
+        host: tab.host,
+        port: tab.port,
+        username: tab.username,
+        password,
+        privateKeyPath: null,
+        passphrase: null,
+        cols: terminal.cols,
+        rows: terminal.rows,
+      },
+    });
+
+    tab.sessionId = sessionId;
+    tab.lastCols = terminal.cols;
+    tab.lastRows = terminal.rows;
+    tab.statusText = '已连接';
+    terminal.writeln('Connected.');
+    terminal.focus();
+  } catch (error) {
+    tab.statusText = '连接失败';
+    terminal.writeln(`Connect failed: ${String(error)}`);
+  } finally {
+    tab.connecting = false;
+    connecting.value = tabs.value.some((item) => item.connecting);
+  }
+}
+
+function setTerminalHost(tabId: string, element: Element | null) {
+  if (!(element instanceof HTMLDivElement)) return;
+
+  terminalHosts.set(tabId, element);
+  const tab = tabs.value.find((item) => item.id === tabId);
+  if (!tab) return;
+
+  ensureTerminal(tab);
+}
+
+function ensureTerminal(tab: TerminalTab) {
+  if (tab.terminal) return;
+
+  const hostElement = terminalHosts.get(tab.id);
+  if (!hostElement) return;
+
+  const terminal = new Terminal({
     cursorBlink: true,
     convertEol: true,
     fontFamily: 'Consolas, "JetBrains Mono", "Noto Sans Mono CJK SC", monospace',
@@ -108,99 +334,131 @@ onMounted(async () => {
     },
   });
 
-  fitAddon = new FitAddon();
+  const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
-  terminal.open(terminalEl.value!);
-
-  await nextTick();
-  fitAddon.fit();
-  terminal.writeln('LiteShell ready. 输入主机信息后点击连接。');
+  terminal.open(hostElement);
+  terminal.writeln('LiteShell ready.');
+  hostElement.addEventListener('pointerdown', () => terminal.focus());
 
   terminal.onData((data) => {
-    if (!sessionId.value) return;
-    void invoke('ssh_write', { id: sessionId.value, data });
+    if (!tab.sessionId) return;
+    void invoke('ssh_write', { id: tab.sessionId, data });
   });
 
-  unlisten = await listen<SshDataPayload>('ssh:data', (event) => {
-    if (!terminal || event.payload.id !== sessionId.value) return;
-    terminal.write(event.payload.data);
-  });
+  tab.terminal = markRaw(terminal);
+  tab.fitAddon = markRaw(fitAddon);
 
-  resizeObserver = new ResizeObserver(() => resizeTerminal());
-  resizeObserver.observe(terminalEl.value!);
-});
-
-onBeforeUnmount(() => {
-  resizeObserver?.disconnect();
-  unlisten?.();
-  terminal?.dispose();
-
-  if (sessionId.value) {
-    void invoke('ssh_close', { id: sessionId.value });
-  }
-});
-
-async function connect() {
-  if (!terminal || !fitAddon) return;
-
-  connecting.value = true;
-  terminal.clear();
-  terminal.writeln(`Connecting to ${form.username}@${form.host}:${form.port} ...`);
-
-  try {
-    fitAddon.fit();
-
-    const id = await invoke<string>('ssh_connect', {
-      payload: {
-        host: form.host,
-        port: form.port,
-        username: form.username,
-        password: form.password || null,
-        privateKeyPath: null,
-        passphrase: null,
-        cols: terminal.cols,
-        rows: terminal.rows,
-      },
-    });
-
-    sessionId.value = id;
-    terminal.writeln('Connected.');
-  } catch (error) {
-    terminal.writeln(`Connect failed: ${String(error)}`);
-  } finally {
-    connecting.value = false;
+  if (tab.id === activeTabId.value) {
+    fitVisibleTab(tab, { resizeRemote: false });
+    terminal.focus();
   }
 }
 
-async function close() {
-  if (!sessionId.value || !terminal) return;
+function activateTab(tabId: string) {
+  activeTabId.value = tabId;
+  scheduleActiveTabRefresh();
+}
 
-  const id = sessionId.value;
-  sessionId.value = '';
-  await invoke('ssh_close', { id });
-  terminal.writeln('\r\nDisconnected.');
+async function closeTab(tabId: string) {
+  const index = tabs.value.findIndex((tab) => tab.id === tabId);
+  if (index < 0) return;
+
+  const tab = tabs.value[index];
+  const hostElement = terminalHosts.get(tab.id);
+
+  if (tab.sessionId) {
+    await invoke('ssh_close', { id: tab.sessionId });
+  }
+
+  if (hostElement) {
+    terminalHosts.delete(tab.id);
+  }
+
+  tab.terminal?.dispose();
+  tabs.value.splice(index, 1);
+
+  if (activeTabId.value === tabId) {
+    activeTabId.value = tabs.value[Math.max(0, index - 1)]?.id || '';
+    scheduleActiveTabRefresh();
+  }
 }
 
 function sendCommand(command: string) {
-  if (!sessionId.value) return;
+  const tab = activeTab.value;
+  if (!tab?.sessionId) return;
+
   void invoke('ssh_write', {
-    id: sessionId.value,
+    id: tab.sessionId,
     data: `${command}\n`,
+  });
+  tab.terminal?.focus();
+}
+
+function handleWindowResize() {
+  scheduleActiveTabResize();
+}
+
+function scheduleActiveTabRefresh() {
+  const tabId = activeTabId.value;
+
+  void nextTick(() => {
+    requestAnimationFrame(() => {
+      if (activeTabId.value !== tabId) return;
+
+      const terminal = activeTab.value?.terminal;
+      if (!terminal) return;
+
+      terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      terminal.focus();
+    });
   });
 }
 
-function resizeTerminal() {
-  if (!terminal || !fitAddon) return;
+function scheduleActiveTabResize() {
+  const tabId = activeTabId.value;
 
-  fitAddon.fit();
+  void nextTick(() => {
+    requestAnimationFrame(() => {
+      if (activeTabId.value !== tabId) return;
+      const tab = activeTab.value;
+      if (!tab) return;
+      fitVisibleTab(tab, { resizeRemote: true });
+      tab.terminal?.focus();
+    });
+  });
+}
 
-  if (!sessionId.value) return;
+function fitVisibleTab(tab: TerminalTab, options: { resizeRemote: boolean }) {
+  if (!tab.terminal || !tab.fitAddon) return;
+
+  const hostElement = terminalHosts.get(tab.id);
+  if (!hostElement) return;
+
+  const rect = hostElement.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+
+  tab.fitAddon.fit();
+
+  const { cols, rows } = tab.terminal;
+  if (!options.resizeRemote || !tab.sessionId || cols <= 0 || rows <= 0) return;
+  if (tab.lastCols === cols && tab.lastRows === rows) return;
+
+  tab.lastCols = cols;
+  tab.lastRows = rows;
 
   void invoke('ssh_resize', {
-    id: sessionId.value,
-    cols: terminal.cols,
-    rows: terminal.rows,
+    id: tab.sessionId,
+    cols,
+    rows,
   });
+}
+
+function createId() {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 </script>
 
@@ -225,8 +483,14 @@ function resizeTerminal() {
   padding: 14px 18px;
 }
 
-.toolbar h2 {
+.toolbar h2,
+.host-list-card h3,
+.quick-card h3,
+.panel-title-row h3 {
   margin: 0;
+}
+
+.toolbar h2 {
   font-size: 20px;
 }
 
@@ -251,24 +515,46 @@ function resizeTerminal() {
 
 .content-grid {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: 320px minmax(0, 1fr);
   min-height: 0;
   flex: 1;
   gap: 16px;
 }
 
+.host-panel {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .connect-card,
-.terminal-card {
+.host-list-card,
+.quick-card,
+.workspace-card {
   border: 1px solid #1e293b;
   border-radius: 16px;
   background: #0f172a;
 }
 
-.connect-card {
+.connect-card,
+.host-list-card,
+.quick-card {
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 16px;
+}
+
+.host-list-card {
+  min-height: 0;
+  overflow: auto;
+}
+
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .connect-card label {
@@ -298,18 +584,26 @@ function resizeTerminal() {
 
 .action-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 86px;
   gap: 10px;
   margin-top: 4px;
 }
 
 .primary-button,
 .ghost-button,
-.command-button {
-  height: 36px;
+.command-button,
+.tiny-button,
+.host-item,
+.tab-item {
   border-radius: 10px;
   color: #fff;
   cursor: pointer;
+}
+
+.primary-button,
+.ghost-button,
+.command-button {
+  height: 36px;
 }
 
 .primary-button {
@@ -317,9 +611,16 @@ function resizeTerminal() {
 }
 
 .ghost-button,
-.command-button {
+.command-button,
+.tiny-button {
   border: 1px solid #334155;
   background: #1e293b;
+}
+
+.tiny-button {
+  height: 28px;
+  padding: 0 10px;
+  color: #cbd5e1;
 }
 
 .primary-button:disabled,
@@ -329,16 +630,38 @@ function resizeTerminal() {
   cursor: not-allowed;
 }
 
-.quick-card {
-  display: grid;
-  gap: 8px;
-  margin-top: 10px;
+.empty-tip,
+.empty-tabs,
+.welcome-card p {
+  color: #94a3b8;
+  font-size: 13px;
 }
 
-.quick-card h3 {
-  margin: 0 0 4px;
-  color: #cbd5e1;
+.host-item {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #1e293b;
+  background: #111827;
+  padding: 10px;
+  text-align: left;
+}
+
+.host-item:hover {
+  border-color: #2563eb;
+}
+
+.host-item__name {
+  color: #f8fafc;
   font-size: 14px;
+}
+
+.host-item__meta {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.quick-card {
+  flex: 0 0 auto;
 }
 
 .command-button {
@@ -346,9 +669,66 @@ function resizeTerminal() {
   padding: 0 10px;
 }
 
-.terminal-card {
+.workspace-card {
+  display: flex;
   min-width: 0;
   min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tabs-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  border-bottom: 1px solid #1e293b;
+  padding: 8px;
+  overflow-x: auto;
+}
+
+.tab-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  border: 1px solid #334155;
+  background: #111827;
+  padding: 0 8px 0 10px;
+  white-space: nowrap;
+}
+
+.tab-item--active {
+  border-color: #2563eb;
+  background: #1e293b;
+}
+
+.tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #64748b;
+}
+
+.tab-dot--online {
+  background: #22c55e;
+}
+
+.tab-close {
+  color: #94a3b8;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.tab-close:hover {
+  color: #fff;
+}
+
+.terminal-card {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
   padding: 10px;
 }
 
@@ -358,5 +738,21 @@ function resizeTerminal() {
   overflow: hidden;
   border-radius: 12px;
   background: #020617;
+}
+
+.welcome-card {
+  display: grid;
+  height: 100%;
+  place-content: center;
+  text-align: center;
+}
+
+.welcome-card h3 {
+  margin: 0 0 8px;
+  color: #f8fafc;
+}
+
+.welcome-card p {
+  margin: 4px 0;
 }
 </style>
