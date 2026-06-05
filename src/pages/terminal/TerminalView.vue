@@ -235,11 +235,11 @@ function saveHost() {
 async function saveAndConnect() {
   if (!canConnect.value || connecting.value) return;
 
+  const password = form.password;
   const host = saveHost();
   if (!host) return;
 
   hostStore.touchHost(host.id);
-  const password = form.password;
   form.password = '';
 
   await openTerminalTab(host, password);
