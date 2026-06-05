@@ -5,10 +5,6 @@ description = "LiteShell lightweight SSH/SFTP desktop client"
 authors = ["kelei321"]
 edition = "2021"
 
-[lib]
-name = "lite_shell_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
