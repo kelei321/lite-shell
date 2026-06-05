@@ -152,6 +152,8 @@ interface TerminalTab {
   statusText: string;
   terminal?: Terminal;
   fitAddon?: FitAddon;
+  lastCols?: number;
+  lastRows?: number;
 }
 
 const hostStore = useHostStore();
@@ -176,7 +178,6 @@ const canSave = computed(() => Boolean(form.host.trim() && form.username.trim())
 const canConnect = computed(() => Boolean(canSave.value && form.password));
 
 let unlisten: UnlistenFn | undefined;
-let resizeObserver: ResizeObserver | undefined;
 
 onMounted(async () => {
   unlisten = await listen<SshDataPayload>('ssh:data', (event) => {
@@ -184,12 +185,12 @@ onMounted(async () => {
     tab?.terminal?.write(event.payload.data);
   });
 
-  resizeObserver = new ResizeObserver(() => resizeActiveTab());
+  window.addEventListener('resize', handleWindowResize);
 });
 
 onBeforeUnmount(() => {
   unlisten?.();
-  resizeObserver?.disconnect();
+  window.removeEventListener('resize', handleWindowResize);
 
   for (const tab of tabs.value) {
     if (tab.sessionId) {
@@ -269,14 +270,13 @@ async function openTerminalTab(host: HostProfile, password: string) {
 
 async function connectTab(tab: TerminalTab, password: string) {
   const terminal = tab.terminal;
-  const fitAddon = tab.fitAddon;
-  if (!terminal || !fitAddon) return;
+  if (!terminal) return;
 
   terminal.clear();
   terminal.writeln(`Connecting to ${tab.username}@${tab.host}:${tab.port} ...`);
 
   try {
-    fitAddon.fit();
+    fitVisibleTab(tab, { resizeRemote: false });
 
     const sessionId = await invoke<string>('ssh_connect', {
       payload: {
@@ -292,8 +292,11 @@ async function connectTab(tab: TerminalTab, password: string) {
     });
 
     tab.sessionId = sessionId;
+    tab.lastCols = terminal.cols;
+    tab.lastRows = terminal.rows;
     tab.statusText = '已连接';
     terminal.writeln('Connected.');
+    terminal.focus();
   } catch (error) {
     tab.statusText = '连接失败';
     terminal.writeln(`Connect failed: ${String(error)}`);
@@ -314,10 +317,7 @@ function setTerminalHost(tabId: string, element: Element | null) {
 }
 
 function ensureTerminal(tab: TerminalTab) {
-  if (tab.terminal) {
-    resizeActiveTab();
-    return;
-  }
+  if (tab.terminal) return;
 
   const hostElement = terminalHosts.get(tab.id);
   if (!hostElement) return;
@@ -338,6 +338,7 @@ function ensureTerminal(tab: TerminalTab) {
   terminal.loadAddon(fitAddon);
   terminal.open(hostElement);
   terminal.writeln('LiteShell ready.');
+  hostElement.addEventListener('pointerdown', () => terminal.focus());
 
   terminal.onData((data) => {
     if (!tab.sessionId) return;
@@ -347,13 +348,15 @@ function ensureTerminal(tab: TerminalTab) {
   tab.terminal = markRaw(terminal);
   tab.fitAddon = markRaw(fitAddon);
 
-  resizeObserver?.observe(hostElement);
-  fitAddon.fit();
+  if (tab.id === activeTabId.value) {
+    fitVisibleTab(tab, { resizeRemote: false });
+    terminal.focus();
+  }
 }
 
 function activateTab(tabId: string) {
   activeTabId.value = tabId;
-  void nextTick(() => resizeActiveTab());
+  scheduleActiveTabRefresh();
 }
 
 async function closeTab(tabId: string) {
@@ -368,7 +371,6 @@ async function closeTab(tabId: string) {
   }
 
   if (hostElement) {
-    resizeObserver?.unobserve(hostElement);
     terminalHosts.delete(tab.id);
   }
 
@@ -377,6 +379,7 @@ async function closeTab(tabId: string) {
 
   if (activeTabId.value === tabId) {
     activeTabId.value = tabs.value[Math.max(0, index - 1)]?.id || '';
+    scheduleActiveTabRefresh();
   }
 }
 
@@ -388,20 +391,65 @@ function sendCommand(command: string) {
     id: tab.sessionId,
     data: `${command}\n`,
   });
+  tab.terminal?.focus();
 }
 
-function resizeActiveTab() {
-  const tab = activeTab.value;
-  if (!tab?.terminal || !tab.fitAddon) return;
+function handleWindowResize() {
+  scheduleActiveTabResize();
+}
+
+function scheduleActiveTabRefresh() {
+  const tabId = activeTabId.value;
+
+  void nextTick(() => {
+    requestAnimationFrame(() => {
+      if (activeTabId.value !== tabId) return;
+
+      const terminal = activeTab.value?.terminal;
+      if (!terminal) return;
+
+      terminal.refresh(0, Math.max(0, terminal.rows - 1));
+      terminal.focus();
+    });
+  });
+}
+
+function scheduleActiveTabResize() {
+  const tabId = activeTabId.value;
+
+  void nextTick(() => {
+    requestAnimationFrame(() => {
+      if (activeTabId.value !== tabId) return;
+      const tab = activeTab.value;
+      if (!tab) return;
+      fitVisibleTab(tab, { resizeRemote: true });
+      tab.terminal?.focus();
+    });
+  });
+}
+
+function fitVisibleTab(tab: TerminalTab, options: { resizeRemote: boolean }) {
+  if (!tab.terminal || !tab.fitAddon) return;
+
+  const hostElement = terminalHosts.get(tab.id);
+  if (!hostElement) return;
+
+  const rect = hostElement.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
 
   tab.fitAddon.fit();
 
-  if (!tab.sessionId) return;
+  const { cols, rows } = tab.terminal;
+  if (!options.resizeRemote || !tab.sessionId || cols <= 0 || rows <= 0) return;
+  if (tab.lastCols === cols && tab.lastRows === rows) return;
+
+  tab.lastCols = cols;
+  tab.lastRows = rows;
 
   void invoke('ssh_resize', {
     id: tab.sessionId,
-    cols: tab.terminal.cols,
-    rows: tab.terminal.rows,
+    cols,
+    rows,
   });
 }
 
