@@ -125,7 +125,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { FitAddon } from '@xterm/addon-fit';
@@ -344,8 +344,8 @@ function ensureTerminal(tab: TerminalTab) {
     void invoke('ssh_write', { id: tab.sessionId, data });
   });
 
-  tab.terminal = terminal;
-  tab.fitAddon = fitAddon;
+  tab.terminal = markRaw(terminal);
+  tab.fitAddon = markRaw(fitAddon);
 
   resizeObserver?.observe(hostElement);
   fitAddon.fit();
