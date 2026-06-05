@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "node scripts/ensure-icons.mjs && node scripts/patch-nonblocking.mjs",
+    "predev": "node scripts/ensure-icons.mjs",
     "dev": "vite",
-    "build": "node scripts/ensure-icons.mjs && node scripts/patch-nonblocking.mjs && vue-tsc --noEmit && vite build",
+    "build": "node scripts/ensure-icons.mjs && vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "node scripts/ensure-icons.mjs && node scripts/patch-nonblocking.mjs && tauri"
+    "tauri": "node scripts/ensure-icons.mjs && tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
