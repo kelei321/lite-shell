@@ -10,17 +10,37 @@
       </div>
 
       <nav class="nav-list">
-        <button class="nav-item nav-item--active" type="button">终端</button>
-        <button class="nav-item" type="button" disabled>SFTP</button>
+        <button
+          class="nav-item"
+          :class="{ 'nav-item--active': activeView === 'terminal' }"
+          type="button"
+          @click="activeView = 'terminal'"
+        >
+          终端
+        </button>
+        <button
+          class="nav-item"
+          :class="{ 'nav-item--active': activeView === 'sftp' }"
+          type="button"
+          @click="activeView = 'sftp'"
+        >
+          文件
+        </button>
         <button class="nav-item" type="button" disabled>监控</button>
         <button class="nav-item" type="button" disabled>快捷命令</button>
       </nav>
     </aside>
 
-    <TerminalView />
+    <TerminalView v-show="activeView === 'terminal'" />
+    <SftpView v-show="activeView === 'sftp'" />
   </main>
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue';
+
+import SftpView from './pages/sftp/SftpView.vue';
 import TerminalView from './pages/terminal/TerminalView.vue';
+
+const activeView = ref<'terminal' | 'sftp'>('terminal');
 </script>
