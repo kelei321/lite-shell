@@ -3,7 +3,7 @@
     <header class="toolbar">
       <div>
         <h2>SFTP 文件</h2>
-        <p>复用主机列表，密码只用于本次 SFTP 连接。</p>
+        <p>自动跟随工作台当前主机，密码只用于本次 SFTP 连接。</p>
       </div>
       <div class="status" :class="{ 'status--online': connectionId }">
         {{ statusText }}
@@ -19,6 +19,10 @@
               断开
             </button>
           </div>
+
+          <p v-if="workspaceStore.hasActiveHost" class="sync-tip">
+            已同步当前工作台主机：{{ workspaceStore.activeHost?.username }}@{{ workspaceStore.activeHost?.host }}:{{ workspaceStore.activeHost?.port }}
+          </p>
 
           <label>
             <span>名称</span>
@@ -126,10 +130,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 
 import { type HostProfile, useHostStore } from '@/stores/hosts';
+import { type WorkspaceHost, useWorkspaceStore } from '@/stores/workspace';
 
 interface RemoteFileItem {
   name: string;
@@ -139,6 +144,7 @@ interface RemoteFileItem {
 }
 
 const hostStore = useHostStore();
+const workspaceStore = useWorkspaceStore();
 
 const form = reactive({
   id: '',
@@ -167,11 +173,21 @@ const statusText = computed(() => {
   return '未连接';
 });
 
+watch(
+  () => workspaceStore.activeHost,
+  (host) => {
+    if (!host) return;
+    syncWorkspaceHost(host);
+  },
+  { immediate: true },
+);
+
 onBeforeUnmount(() => {
   void closeSftp();
 });
 
-function selectHost(host: HostProfile) {
+function syncWorkspaceHost(host: WorkspaceHost) {
+  const changed = form.id !== host.id;
   form.id = host.id;
   form.name = host.name;
   form.host = host.host;
@@ -179,6 +195,14 @@ function selectHost(host: HostProfile) {
   form.username = host.username;
   form.password = '';
   errorMessage.value = '';
+
+  if (changed && connectionId.value) {
+    void closeSftp({ silent: true });
+  }
+}
+
+function selectHost(host: HostProfile) {
+  workspaceStore.setActiveHost(host);
 }
 
 async function connectSftp() {
@@ -389,6 +413,17 @@ function formatSize(size: number) {
 .connect-card span {
   color: #94a3b8;
   font-size: 12px;
+}
+
+.sync-tip {
+  margin: 0;
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  border-radius: 10px;
+  background: rgba(34, 197, 94, 0.08);
+  color: #bbf7d0;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .connect-card input {
