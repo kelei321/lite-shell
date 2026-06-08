@@ -3,7 +3,7 @@
     <header class="toolbar">
       <div>
         <h2>SFTP 文件</h2>
-        <p>自动跟随工作台当前主机，密码只用于本次 SFTP 连接。</p>
+        <p>自动跟随工作台当前主机，并复用当前 SSH 内存认证。</p>
       </div>
       <div class="status" :class="{ 'status--online': connectionId }">
         {{ statusText }}
@@ -11,76 +11,17 @@
     </header>
 
     <div class="content-grid">
-      <aside class="host-panel">
-        <form class="connect-card" @submit.prevent="connectSftp">
-          <div class="panel-title-row">
-            <h3>连接信息</h3>
-            <button class="tiny-button" :disabled="!connectionId" type="button" @click="closeSftp()">
-              断开
-            </button>
-          </div>
-
-          <p v-if="workspaceStore.hasActiveHost" class="sync-tip">
-            已同步当前工作台主机：{{ workspaceStore.activeHost?.username }}@{{ workspaceStore.activeHost?.host }}:{{ workspaceStore.activeHost?.port }}
-          </p>
-
-          <label>
-            <span>名称</span>
-            <input v-model.trim="form.name" autocomplete="off" placeholder="生产服务器" />
-          </label>
-
-          <label>
-            <span>主机</span>
-            <input v-model.trim="form.host" autocomplete="off" placeholder="127.0.0.1" />
-          </label>
-
-          <label>
-            <span>端口</span>
-            <input v-model.number="form.port" min="1" max="65535" type="number" />
-          </label>
-
-          <label>
-            <span>用户名</span>
-            <input v-model.trim="form.username" autocomplete="username" placeholder="root" />
-          </label>
-
-          <label>
-            <span>密码</span>
-            <input v-model="form.password" autocomplete="current-password" type="password" />
-          </label>
-
-          <button class="primary-button" :disabled="!canConnect || connecting" type="submit">
-            {{ connecting ? '连接中...' : '连接 SFTP' }}
-          </button>
-        </form>
-
-        <section class="host-list-card">
-          <h3>主机列表</h3>
-          <p v-if="hostStore.sortedHosts.length === 0" class="empty-tip">
-            暂无主机，请先在终端页保存主机。
-          </p>
-
-          <button
-            v-for="host in hostStore.sortedHosts"
-            :key="host.id"
-            class="host-item"
-            :class="{ 'host-item--active': host.id === form.id }"
-            type="button"
-            @click="selectHost(host)"
-          >
-            <span class="host-item__name">{{ host.name }}</span>
-            <span class="host-item__meta">{{ host.username }}@{{ host.host }}:{{ host.port }}</span>
-          </button>
-        </section>
-      </aside>
-
       <section class="browser-card">
+        <div class="status-strip" :class="{ 'status-strip--online': connectionId }">
+          {{ statusNotice }}
+        </div>
+
         <div class="path-bar">
           <button class="ghost-button" :disabled="!canBrowse || currentPath === '/'" type="button" @click="goParent">
             上级
           </button>
           <div class="path-text">{{ currentPath }}</div>
-          <button class="ghost-button" :disabled="!canBrowse || loading" type="button" @click="refresh">
+          <button class="ghost-button" :disabled="autoConnecting || loading" type="button" @click="refresh">
             刷新
           </button>
         </div>
@@ -98,7 +39,7 @@
             </thead>
             <tbody>
               <tr v-if="!connectionId">
-                <td colspan="3" class="empty-cell">选择主机并输入密码后连接。</td>
+                <td colspan="3" class="empty-cell">{{ statusNotice }}</td>
               </tr>
               <tr v-else-if="loading">
                 <td colspan="3" class="empty-cell">目录加载中...</td>
@@ -130,11 +71,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, shallowRef, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 
-import { type HostProfile, useHostStore } from '@/stores/hosts';
-import { type WorkspaceHost, useWorkspaceStore } from '@/stores/workspace';
+import { type WorkspaceCredential, type WorkspaceHost, useWorkspaceStore } from '@/stores/workspace';
 
 interface RemoteFileItem {
   name: string;
@@ -143,158 +83,298 @@ interface RemoteFileItem {
   size: number;
 }
 
-const hostStore = useHostStore();
+interface SftpSessionState {
+  hostId: string;
+  connectionId: string;
+  currentPath: string;
+  files: RemoteFileItem[];
+  loading: boolean;
+  connecting: boolean;
+  errorMessage: string;
+}
+
 const workspaceStore = useWorkspaceStore();
 
-const form = reactive({
-  id: '',
-  name: '',
-  host: '',
-  port: 22,
-  username: '',
-  password: '',
-});
+const sessionsByHostId = shallowRef<Record<string, SftpSessionState>>({});
 
-const connectionId = ref('');
-const currentPath = ref('/');
-const files = ref<RemoteFileItem[]>([]);
-const connecting = ref(false);
-const loading = ref(false);
-const errorMessage = ref('');
-
-const canConnect = computed(() =>
-  Boolean(form.host.trim() && form.username.trim() && form.password && !loading.value),
+const activeHost = computed(() => workspaceStore.activeHost);
+const cachedCredential = computed(() =>
+  activeHost.value ? workspaceStore.getCredential(activeHost.value.id) : undefined,
 );
-const canBrowse = computed(() => Boolean(connectionId.value && !connecting.value));
+const canAutoConnect = computed(() =>
+  Boolean(activeHost.value && cachedCredential.value?.password),
+);
+const currentSession = computed(() => {
+  const hostId = activeHost.value?.id;
+  return hostId ? sessionsByHostId.value[hostId] : undefined;
+});
+const connectionId = computed(() => currentSession.value?.connectionId || '');
+const currentPath = computed(() => currentSession.value?.currentPath || '/');
+const files = computed(() => currentSession.value?.files || []);
+const loading = computed(() => Boolean(currentSession.value?.loading));
+const autoConnecting = computed(() => Boolean(currentSession.value?.connecting));
+const errorMessage = computed(() => currentSession.value?.errorMessage || '');
+const canBrowse = computed(() => Boolean(connectionId.value && !autoConnecting.value));
+const activeHostLabel = computed(() => {
+  const host = activeHost.value;
+  if (!host) return '';
+  return `${host.username}@${host.host}`;
+});
 const statusText = computed(() => {
-  if (connecting.value) return '连接中';
+  if (autoConnecting.value) return '连接中';
   if (loading.value) return '加载中';
   if (connectionId.value) return '已连接';
   return '未连接';
 });
+const statusNotice = computed(() => {
+  if (!activeHost.value) return '请先连接 SSH 主机。';
+  if (errorMessage.value) return errorMessage.value;
+  if (!canAutoConnect.value) return '当前主机未缓存认证，请重新连接 SSH。';
+  if (autoConnecting.value) return '正在连接 SFTP...';
+  if (loading.value) return '目录加载中...';
+  if (connectionId.value) return `SFTP 已连接：${activeHostLabel.value}`;
+  return '正在连接 SFTP...';
+});
 
 watch(
-  () => workspaceStore.activeHost,
-  (host) => {
-    if (!host) return;
-    syncWorkspaceHost(host);
+  () => ({
+    hostId: workspaceStore.activeHost?.id || '',
+    credentialVersion: workspaceStore.credentialVersion,
+  }),
+  () => {
+    void syncSftpWithWorkspaceHost();
+    void cleanupSessionsWithoutCredential();
   },
   { immediate: true },
 );
 
 onBeforeUnmount(() => {
-  void closeSftp();
+  void closeAllSessions();
 });
 
-function syncWorkspaceHost(host: WorkspaceHost) {
-  const changed = form.id !== host.id;
-  form.id = host.id;
-  form.name = host.name;
-  form.host = host.host;
-  form.port = host.port;
-  form.username = host.username;
-  form.password = '';
-  errorMessage.value = '';
+async function syncSftpWithWorkspaceHost() {
+  const host = workspaceStore.activeHost;
 
-  if (changed && connectionId.value) {
-    void closeSftp({ silent: true });
+  if (!host) {
+    return;
   }
+
+  const credential = workspaceStore.getCredential(host.id);
+
+  if (!credential?.password) {
+    await closeSftpSession(host.id, { silent: true });
+    removeSession(host.id);
+    return;
+  }
+
+  const existing = sessionsByHostId.value[host.id];
+  if (existing?.connectionId || existing?.connecting) {
+    return;
+  }
+
+  await connectSftpWithCredential(host, credential);
 }
 
-function selectHost(host: HostProfile) {
-  workspaceStore.setActiveHost(host);
-}
-
-async function connectSftp() {
-  if (!canConnect.value || connecting.value) return;
-
-  const password = form.password;
-  connecting.value = true;
-  errorMessage.value = '';
+async function connectSftpWithCredential(
+  host: WorkspaceHost,
+  credential: WorkspaceCredential,
+) {
+  const initialPath = sessionsByHostId.value[host.id]?.currentPath || '/';
+  upsertSession(host.id, {
+    connecting: true,
+    loading: false,
+    errorMessage: '',
+  });
 
   try {
-    await closeSftp({ silent: true });
-
     const id = await invoke<string>('sftp_connect', {
       payload: {
-        host: form.host,
-        port: form.port,
-        username: form.username,
-        password,
+        host: host.host,
+        port: host.port,
+        username: host.username,
+        password: credential.password,
         privateKeyPath: null,
         passphrase: null,
       },
     });
 
-    connectionId.value = id;
-    currentPath.value = '/';
-    form.password = '';
-    if (form.id) hostStore.touchHost(form.id);
-    await loadDir('/');
-  } catch (error) {
-    errorMessage.value = `SFTP 连接失败：${String(error)}`;
-    connectionId.value = '';
-    files.value = [];
+    if (!workspaceStore.hasCredential(host.id)) {
+      await invoke('sftp_close', { connectionId: id });
+      return;
+    }
+
+    upsertSession(host.id, {
+      connectionId: id,
+      currentPath: initialPath,
+      connecting: false,
+      errorMessage: '',
+    });
+    await loadDir(initialPath, host.id);
+  } catch {
+    if (!workspaceStore.hasCredential(host.id)) {
+      removeSession(host.id);
+      return;
+    }
+
+    upsertSession(host.id, {
+      connectionId: '',
+      connecting: false,
+      loading: false,
+      files: [],
+      errorMessage: 'SFTP 自动连接失败，请检查当前 SSH 认证或服务器 SFTP 权限。',
+    });
   } finally {
-    connecting.value = false;
+    const latest = sessionsByHostId.value[host.id];
+    if (latest?.connecting) {
+      upsertSession(host.id, { connecting: false });
+    }
   }
 }
 
-async function loadDir(path: string) {
-  if (!connectionId.value) return;
+async function loadDir(path: string, hostId = activeHost.value?.id) {
+  if (!hostId) return;
 
-  loading.value = true;
-  errorMessage.value = '';
+  const session = sessionsByHostId.value[hostId];
+  const expectedConnectionId = session?.connectionId;
+  if (!expectedConnectionId) return;
+
+  upsertSession(hostId, { loading: true, errorMessage: '' });
 
   try {
     const items = await invoke<RemoteFileItem[]>('sftp_list_dir', {
-      connectionId: connectionId.value,
+      connectionId: expectedConnectionId,
       path,
     });
 
-    files.value = items;
-    currentPath.value = path;
-  } catch (error) {
-    files.value = [];
-    errorMessage.value = `目录加载失败：${String(error)}`;
+    const latest = sessionsByHostId.value[hostId];
+    if (!latest || latest.connectionId !== expectedConnectionId) return;
+
+    upsertSession(hostId, {
+      files: items,
+      currentPath: path,
+      loading: false,
+      errorMessage: '',
+    });
+  } catch {
+    const latest = sessionsByHostId.value[hostId];
+    if (!latest || latest.connectionId !== expectedConnectionId) return;
+
+    upsertSession(hostId, {
+      files: [],
+      loading: false,
+      errorMessage: '目录加载失败，请检查连接状态或目录权限。',
+    });
   } finally {
-    loading.value = false;
+    const latest = sessionsByHostId.value[hostId];
+    if (latest?.connectionId === expectedConnectionId && latest.loading) {
+      upsertSession(hostId, { loading: false });
+    }
   }
 }
 
-async function closeSftp(options: { silent?: boolean } = {}) {
-  const id = connectionId.value;
-  connectionId.value = '';
-  files.value = [];
-  currentPath.value = '/';
+function getCurrentSession() {
+  const hostId = activeHost.value?.id;
+  return hostId ? sessionsByHostId.value[hostId] : undefined;
+}
 
-  if (!options.silent) {
-    errorMessage.value = '';
+function upsertSession(hostId: string, patch: Partial<SftpSessionState>) {
+  const current = sessionsByHostId.value[hostId];
+  const fallback: SftpSessionState = {
+    hostId,
+    connectionId: '',
+    currentPath: '/',
+    files: [],
+    loading: false,
+    connecting: false,
+    errorMessage: '',
+  };
+
+  sessionsByHostId.value = {
+    ...sessionsByHostId.value,
+    [hostId]: {
+      ...fallback,
+      ...current,
+      ...patch,
+    },
+  };
+}
+
+function removeSession(hostId: string) {
+  if (!sessionsByHostId.value[hostId]) return;
+
+  const next = { ...sessionsByHostId.value };
+  delete next[hostId];
+  sessionsByHostId.value = next;
+}
+
+async function closeSftpSession(hostId: string, options: { silent?: boolean } = {}) {
+  const session = sessionsByHostId.value[hostId];
+  const id = session?.connectionId;
+
+  if (session) {
+    upsertSession(hostId, {
+      connectionId: '',
+      files: [],
+      loading: false,
+      connecting: false,
+      errorMessage: options.silent ? session.errorMessage : '',
+    });
   }
 
   if (!id) return;
 
   try {
     await invoke('sftp_close', { connectionId: id });
-  } catch (error) {
+  } catch {
     if (!options.silent) {
-      errorMessage.value = `SFTP 关闭失败：${String(error)}`;
+      upsertSession(hostId, { errorMessage: 'SFTP 关闭失败。' });
     }
   }
 }
 
+async function cleanupSessionsWithoutCredential() {
+  const hostIds = Object.keys(sessionsByHostId.value);
+
+  for (const hostId of hostIds) {
+    if (!workspaceStore.hasCredential(hostId)) {
+      await closeSftpSession(hostId, { silent: true });
+      removeSession(hostId);
+    }
+  }
+}
+
+async function closeAllSessions() {
+  const hostIds = Object.keys(sessionsByHostId.value);
+
+  await Promise.all(hostIds.map((hostId) => closeSftpSession(hostId, { silent: true })));
+  sessionsByHostId.value = {};
+}
+
 function openItem(file: RemoteFileItem) {
-  if (!file.isDir || loading.value) return;
-  void loadDir(file.path);
+  const hostId = activeHost.value?.id;
+  if (!hostId || !file.isDir || getCurrentSession()?.loading) return;
+  void loadDir(file.path, hostId);
 }
 
 function goParent() {
-  if (currentPath.value === '/') return;
-  void loadDir(getParentPath(currentPath.value));
+  const hostId = activeHost.value?.id;
+  const path = currentPath.value;
+  if (!hostId || path === '/') return;
+  void loadDir(getParentPath(path), hostId);
 }
 
 function refresh() {
-  void loadDir(currentPath.value);
+  const host = activeHost.value;
+  if (!host) return;
+
+  const session = sessionsByHostId.value[host.id];
+
+  if (!session?.connectionId) {
+    void syncSftpWithWorkspaceHost();
+    return;
+  }
+
+  void loadDir(session.currentPath || '/', host.id);
 }
 
 function getParentPath(path: string) {
@@ -334,13 +414,8 @@ function formatSize(size: number) {
   padding: 14px 18px;
 }
 
-.toolbar h2,
-.host-list-card h3,
-.panel-title-row h3 {
-  margin: 0;
-}
-
 .toolbar h2 {
+  margin: 0;
   font-size: 20px;
 }
 
@@ -365,146 +440,8 @@ function formatSize(size: number) {
 
 .content-grid {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
   min-height: 0;
   flex: 1;
-  gap: 16px;
-}
-
-.host-panel {
-  display: flex;
-  min-height: 0;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.connect-card,
-.host-list-card,
-.browser-card {
-  border: 1px solid #1e293b;
-  border-radius: 16px;
-  background: #0f172a;
-}
-
-.connect-card,
-.host-list-card {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 16px;
-}
-
-.host-list-card {
-  min-height: 0;
-  overflow: auto;
-}
-
-.panel-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.connect-card label {
-  display: grid;
-  gap: 6px;
-}
-
-.connect-card span {
-  color: #94a3b8;
-  font-size: 12px;
-}
-
-.sync-tip {
-  margin: 0;
-  border: 1px solid rgba(34, 197, 94, 0.2);
-  border-radius: 10px;
-  background: rgba(34, 197, 94, 0.08);
-  color: #bbf7d0;
-  padding: 8px 10px;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.connect-card input {
-  width: 100%;
-  height: 36px;
-  border: 1px solid #334155;
-  border-radius: 10px;
-  outline: none;
-  background: #020617;
-  color: #e5e7eb;
-  padding: 0 10px;
-}
-
-.connect-card input:focus {
-  border-color: #2563eb;
-}
-
-.primary-button,
-.ghost-button,
-.tiny-button,
-.host-item {
-  border-radius: 10px;
-  color: #fff;
-  cursor: pointer;
-}
-
-.primary-button,
-.ghost-button {
-  height: 36px;
-}
-
-.primary-button {
-  background: #2563eb;
-}
-
-.ghost-button,
-.tiny-button {
-  border: 1px solid #334155;
-  background: #1e293b;
-}
-
-.tiny-button {
-  height: 28px;
-  padding: 0 10px;
-  color: #cbd5e1;
-}
-
-.primary-button:disabled,
-.ghost-button:disabled,
-.tiny-button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.empty-tip {
-  color: #94a3b8;
-  font-size: 13px;
-}
-
-.host-item {
-  display: grid;
-  gap: 4px;
-  border: 1px solid #1e293b;
-  background: #111827;
-  padding: 10px;
-  text-align: left;
-}
-
-.host-item:hover,
-.host-item--active {
-  border-color: #2563eb;
-}
-
-.host-item__name {
-  color: #f8fafc;
-  font-size: 14px;
-}
-
-.host-item__meta {
-  color: #94a3b8;
-  font-size: 12px;
 }
 
 .browser-card {
@@ -513,6 +450,21 @@ function formatSize(size: number) {
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
+  border: 1px solid #1e293b;
+  border-radius: 16px;
+  background: #0f172a;
+}
+
+.status-strip {
+  border-bottom: 1px solid #1e293b;
+  background: rgba(15, 23, 42, 0.72);
+  color: #cbd5e1;
+  padding: 9px 12px;
+  font-size: 12px;
+}
+
+.status-strip--online {
+  color: #bbf7d0;
 }
 
 .path-bar {
@@ -536,6 +488,20 @@ function formatSize(size: number) {
   padding: 0 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ghost-button {
+  height: 36px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #1e293b;
+  color: #fff;
+  cursor: pointer;
+}
+
+.ghost-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .error-box {
