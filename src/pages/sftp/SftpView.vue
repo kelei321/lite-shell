@@ -3,7 +3,7 @@
     <header class="toolbar">
       <div>
         <h2>SFTP 文件</h2>
-        <p>自动跟随工作台当前主机，密码只用于本次 SFTP 连接。</p>
+        <p>自动跟随工作台当前主机，并复用当前 SSH 内存认证。</p>
       </div>
       <div class="status" :class="{ 'status--online': connectionId }">
         {{ statusText }}
@@ -11,85 +11,17 @@
     </header>
 
     <div class="content-grid">
-      <aside class="host-panel">
-        <form class="connect-card" @submit.prevent="connectSftp">
-          <div class="panel-title-row">
-            <h3>连接信息</h3>
-            <button class="tiny-button" :disabled="!connectionId" type="button" @click="closeSftp()">
-              断开
-            </button>
-          </div>
-
-          <p v-if="workspaceStore.hasActiveHost" class="sync-tip">
-            已同步当前工作台主机：{{ workspaceStore.activeHost?.username }}@{{ workspaceStore.activeHost?.host }}:{{ workspaceStore.activeHost?.port }}
-          </p>
-
-          <p class="credential-tip" :class="{ 'credential-tip--cached': canUseCachedCredential }">
-            {{ canUseCachedCredential ? '已复用当前 SSH 认证，可直接连接 SFTP。' : '请输入密码连接 SFTP。' }}
-          </p>
-
-          <label>
-            <span>名称</span>
-            <input v-model.trim="form.name" autocomplete="off" placeholder="生产服务器" />
-          </label>
-
-          <label>
-            <span>主机</span>
-            <input v-model.trim="form.host" autocomplete="off" placeholder="127.0.0.1" />
-          </label>
-
-          <label>
-            <span>端口</span>
-            <input v-model.number="form.port" min="1" max="65535" type="number" />
-          </label>
-
-          <label>
-            <span>用户名</span>
-            <input v-model.trim="form.username" autocomplete="username" placeholder="root" />
-          </label>
-
-          <label>
-            <span>密码</span>
-            <input
-              v-model="form.password"
-              autocomplete="current-password"
-              :placeholder="canUseCachedCredential ? '已复用 SSH 认证，无需输入' : ''"
-              type="password"
-            />
-          </label>
-
-          <button class="primary-button" :disabled="!canConnect || connecting" type="submit">
-            {{ connecting ? '连接中...' : '连接 SFTP' }}
-          </button>
-        </form>
-
-        <section class="host-list-card">
-          <h3>主机列表</h3>
-          <p v-if="hostStore.sortedHosts.length === 0" class="empty-tip">
-            暂无主机，请先在终端页保存主机。
-          </p>
-
-          <button
-            v-for="host in hostStore.sortedHosts"
-            :key="host.id"
-            class="host-item"
-            :class="{ 'host-item--active': host.id === form.id }"
-            type="button"
-            @click="selectHost(host)"
-          >
-            <span class="host-item__name">{{ host.name }}</span>
-            <span class="host-item__meta">{{ host.username }}@{{ host.host }}:{{ host.port }}</span>
-          </button>
-        </section>
-      </aside>
-
       <section class="browser-card">
+        <div class="status-strip" :class="{ 'status-strip--online': connectionId }">
+          {{ statusNotice }}
+        </div>
+
         <div class="path-bar">
           <button class="ghost-button" :disabled="!canBrowse || currentPath === '/'" type="button" @click="goParent">
             上级
           </button>
           <div class="path-text">{{ currentPath }}</div>
-          <button class="ghost-button" :disabled="!canBrowse || loading" type="button" @click="refresh">
+          <button class="ghost-button" :disabled="autoConnecting || loading" type="button" @click="refresh">
             刷新
           </button>
         </div>
@@ -107,7 +39,7 @@
             </thead>
             <tbody>
               <tr v-if="!connectionId">
-                <td colspan="3" class="empty-cell">选择主机并输入密码后连接。</td>
+                <td colspan="3" class="empty-cell">{{ statusNotice }}</td>
               </tr>
               <tr v-else-if="loading">
                 <td colspan="3" class="empty-cell">目录加载中...</td>
@@ -139,11 +71,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 
-import { type HostProfile, useHostStore } from '@/stores/hosts';
-import { type WorkspaceHost, useWorkspaceStore } from '@/stores/workspace';
+import { type WorkspaceCredential, type WorkspaceHost, useWorkspaceStore } from '@/stores/workspace';
 
 interface RemoteFileItem {
   name: string;
@@ -152,110 +83,132 @@ interface RemoteFileItem {
   size: number;
 }
 
-const hostStore = useHostStore();
 const workspaceStore = useWorkspaceStore();
 
-const form = reactive({
-  id: '',
-  name: '',
-  host: '',
-  port: 22,
-  username: '',
-  password: '',
-});
-
+const activeSftpHostId = ref('');
 const connectionId = ref('');
 const currentPath = ref('/');
 const files = ref<RemoteFileItem[]>([]);
-const connecting = ref(false);
+const autoConnecting = ref(false);
 const loading = ref(false);
 const errorMessage = ref('');
 
+let syncVersion = 0;
+
+const activeHost = computed(() => workspaceStore.activeHost);
 const cachedCredential = computed(() =>
-  form.id ? workspaceStore.getCredential(form.id) : undefined,
+  activeHost.value ? workspaceStore.getCredential(activeHost.value.id) : undefined,
 );
-const canUseCachedCredential = computed(() => Boolean(cachedCredential.value?.password));
-const canConnect = computed(() =>
-  Boolean(
-    form.host.trim()
-      && form.username.trim()
-      && (cachedCredential.value?.password || form.password)
-      && !loading.value
-      && !connecting.value,
-  ),
+const canAutoConnect = computed(() =>
+  Boolean(activeHost.value && cachedCredential.value?.password),
 );
-const canBrowse = computed(() => Boolean(connectionId.value && !connecting.value));
+const canBrowse = computed(() => Boolean(connectionId.value && !autoConnecting.value));
+const activeHostLabel = computed(() => {
+  const host = activeHost.value;
+  if (!host) return '';
+  return `${host.username}@${host.host}`;
+});
 const statusText = computed(() => {
-  if (connecting.value) return '连接中';
+  if (autoConnecting.value) return '连接中';
   if (loading.value) return '加载中';
   if (connectionId.value) return '已连接';
   return '未连接';
 });
+const statusNotice = computed(() => {
+  if (!activeHost.value) return '请先连接 SSH 主机。';
+  if (errorMessage.value) return errorMessage.value;
+  if (!canAutoConnect.value) return '当前主机未缓存认证，请重新连接 SSH。';
+  if (autoConnecting.value) return '正在连接 SFTP...';
+  if (connectionId.value) return `SFTP 已连接：${activeHostLabel.value}`;
+  return '正在连接 SFTP...';
+});
 
 watch(
-  () => workspaceStore.activeHost,
-  (host) => {
-    if (!host) return;
-    syncWorkspaceHost(host);
+  () => ({
+    hostId: workspaceStore.activeHost?.id || '',
+    credentialCreatedAt: workspaceStore.activeHost
+      ? workspaceStore.getCredential(workspaceStore.activeHost.id)?.createdAt || 0
+      : 0,
+  }),
+  () => {
+    void syncSftpWithWorkspaceHost();
   },
   { immediate: true },
 );
 
 onBeforeUnmount(() => {
-  void closeSftp();
+  syncVersion += 1;
+  void closeSftp({ silent: true });
 });
 
-function syncWorkspaceHost(host: WorkspaceHost) {
-  const changed = form.id !== host.id;
-  form.id = host.id;
-  form.name = host.name;
-  form.host = host.host;
-  form.port = host.port;
-  form.username = host.username;
-  form.password = '';
-  errorMessage.value = '';
+async function syncSftpWithWorkspaceHost() {
+  const syncId = ++syncVersion;
+  const host = workspaceStore.activeHost;
 
-  if (changed && connectionId.value) {
-    void closeSftp({ silent: true });
+  if (!host) {
+    await closeSftp({ silent: true });
+    resetBrowser();
+    errorMessage.value = '';
+    return;
   }
+
+  const credential = workspaceStore.getCredential(host.id);
+
+  if (!credential?.password) {
+    await closeSftp({ silent: true });
+    resetBrowser();
+    errorMessage.value = '';
+    return;
+  }
+
+  if (connectionId.value && activeSftpHostId.value === host.id) {
+    return;
+  }
+
+  await closeSftp({ silent: true });
+  if (syncId !== syncVersion) return;
+  await connectSftpWithCredential(host, credential, syncId);
 }
 
-function selectHost(host: HostProfile) {
-  workspaceStore.setActiveHost(host);
-}
-
-async function connectSftp() {
-  if (!canConnect.value || connecting.value) return;
-
-  const password = cachedCredential.value?.password || form.password;
-  form.password = '';
-  connecting.value = true;
+async function connectSftpWithCredential(
+  host: WorkspaceHost,
+  credential: WorkspaceCredential,
+  syncId: number,
+) {
+  autoConnecting.value = true;
   errorMessage.value = '';
 
   try {
-    await closeSftp({ silent: true });
-
     const id = await invoke<string>('sftp_connect', {
       payload: {
-        host: form.host,
-        port: form.port,
-        username: form.username,
-        password,
+        host: host.host,
+        port: host.port,
+        username: host.username,
+        password: credential.password,
         privateKeyPath: null,
         passphrase: null,
       },
     });
 
+    if (syncId !== syncVersion) {
+      await invoke('sftp_close', { connectionId: id });
+      return;
+    }
+
     connectionId.value = id;
+    activeSftpHostId.value = host.id;
     currentPath.value = '/';
-    if (form.id) hostStore.touchHost(form.id);
     await loadDir('/');
   } catch {
-    errorMessage.value = 'SFTP 连接失败，请检查主机、用户或认证信息。';
+    if (syncId !== syncVersion) return;
     connectionId.value = '';
+    activeSftpHostId.value = '';
     files.value = [];
+    errorMessage.value = 'SFTP 自动连接失败，请检查当前 SSH 认证或服务器 SFTP 权限。';
   } finally {
-    connecting.value = false;
+    if (syncId === syncVersion) {
+      autoConnecting.value = false;
+    }
   }
 }
 
@@ -284,6 +237,7 @@ async function loadDir(path: string) {
 async function closeSftp(options: { silent?: boolean } = {}) {
   const id = connectionId.value;
   connectionId.value = '';
+  activeSftpHostId.value = '';
   files.value = [];
   currentPath.value = '/';
 
@@ -302,6 +256,15 @@ async function closeSftp(options: { silent?: boolean } = {}) {
   }
 }
 
+function resetBrowser() {
+  connectionId.value = '';
+  activeSftpHostId.value = '';
+  files.value = [];
+  currentPath.value = '/';
+  autoConnecting.value = false;
+  loading.value = false;
+}
+
 function openItem(file: RemoteFileItem) {
   if (!file.isDir || loading.value) return;
   void loadDir(file.path);
@@ -313,6 +276,11 @@ function goParent() {
 }
 
 function refresh() {
+  if (!connectionId.value) {
+    void syncSftpWithWorkspaceHost();
+    return;
+  }
+
   void loadDir(currentPath.value);
 }
 
@@ -353,13 +321,8 @@ function formatSize(size: number) {
   padding: 14px 18px;
 }
 
-.toolbar h2,
-.host-list-card h3,
-.panel-title-row h3 {
-  margin: 0;
-}
-
 .toolbar h2 {
+  margin: 0;
   font-size: 20px;
 }
 
@@ -384,163 +347,8 @@ function formatSize(size: number) {
 
 .content-grid {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
   min-height: 0;
   flex: 1;
-  gap: 16px;
-}
-
-.host-panel {
-  display: flex;
-  min-height: 0;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.connect-card,
-.host-list-card,
-.browser-card {
-  border: 1px solid #1e293b;
-  border-radius: 16px;
-  background: #0f172a;
-}
-
-.connect-card,
-.host-list-card {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 16px;
-}
-
-.host-list-card {
-  min-height: 0;
-  overflow: auto;
-}
-
-.panel-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.connect-card label {
-  display: grid;
-  gap: 6px;
-}
-
-.connect-card span {
-  color: #94a3b8;
-  font-size: 12px;
-}
-
-.sync-tip {
-  margin: 0;
-  border: 1px solid rgba(34, 197, 94, 0.2);
-  border-radius: 10px;
-  background: rgba(34, 197, 94, 0.08);
-  color: #bbf7d0;
-  padding: 8px 10px;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.credential-tip {
-  margin: 0;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 10px;
-  background: rgba(15, 23, 42, 0.72);
-  color: #cbd5e1;
-  padding: 8px 10px;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.credential-tip--cached {
-  border-color: rgba(34, 197, 94, 0.2);
-  background: rgba(34, 197, 94, 0.08);
-  color: #bbf7d0;
-}
-
-.connect-card input {
-  width: 100%;
-  height: 36px;
-  border: 1px solid #334155;
-  border-radius: 10px;
-  outline: none;
-  background: #020617;
-  color: #e5e7eb;
-  padding: 0 10px;
-}
-
-.connect-card input:focus {
-  border-color: #2563eb;
-}
-
-.primary-button,
-.ghost-button,
-.tiny-button,
-.host-item {
-  border-radius: 10px;
-  color: #fff;
-  cursor: pointer;
-}
-
-.primary-button,
-.ghost-button {
-  height: 36px;
-}
-
-.primary-button {
-  background: #2563eb;
-}
-
-.ghost-button,
-.tiny-button {
-  border: 1px solid #334155;
-  background: #1e293b;
-}
-
-.tiny-button {
-  height: 28px;
-  padding: 0 10px;
-  color: #cbd5e1;
-}
-
-.primary-button:disabled,
-.ghost-button:disabled,
-.tiny-button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.empty-tip {
-  color: #94a3b8;
-  font-size: 13px;
-}
-
-.host-item {
-  display: grid;
-  gap: 4px;
-  border: 1px solid #1e293b;
-  background: #111827;
-  padding: 10px;
-  text-align: left;
-}
-
-.host-item:hover,
-.host-item--active {
-  border-color: #2563eb;
-}
-
-.host-item__name {
-  color: #f8fafc;
-  font-size: 14px;
-}
-
-.host-item__meta {
-  color: #94a3b8;
-  font-size: 12px;
 }
 
 .browser-card {
@@ -549,6 +357,21 @@ function formatSize(size: number) {
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
+  border: 1px solid #1e293b;
+  border-radius: 16px;
+  background: #0f172a;
+}
+
+.status-strip {
+  border-bottom: 1px solid #1e293b;
+  background: rgba(15, 23, 42, 0.72);
+  color: #cbd5e1;
+  padding: 9px 12px;
+  font-size: 12px;
+}
+
+.status-strip--online {
+  color: #bbf7d0;
 }
 
 .path-bar {
@@ -572,6 +395,20 @@ function formatSize(size: number) {
   padding: 0 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ghost-button {
+  height: 36px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #1e293b;
+  color: #fff;
+  cursor: pointer;
+}
+
+.ghost-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .error-box {

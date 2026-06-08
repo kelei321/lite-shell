@@ -276,12 +276,17 @@ async function closeTab(tabId: string) {
   if (index < 0) return;
   const tab = tabs.value[index];
   if (tab.sessionId) await invoke('ssh_close', { id: tab.sessionId });
-  workspaceStore.clearCredential(tab.hostId);
   terminalHosts.delete(tab.id);
   tab.terminal?.dispose();
   tabs.value.splice(index, 1);
+
+  const stillHasSameHostTab = tabs.value.some((item) => item.hostId === tab.hostId);
+  if (!stillHasSameHostTab) {
+    workspaceStore.clearCredential(tab.hostId);
+  }
+
   if (activeTabId.value === tabId) {
-    const next = tabs.value[Math.max(0, index - 1)];
+    const next = tabs.value[Math.max(0, index - 1)] || tabs.value[0];
     activeTabId.value = next?.id || '';
     if (next) workspaceStore.setActiveHost({ id: next.hostId, name: next.title, host: next.host, port: next.port, username: next.username });
     else workspaceStore.clearActiveHost(tab.hostId);

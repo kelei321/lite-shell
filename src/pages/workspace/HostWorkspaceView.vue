@@ -78,7 +78,7 @@
         <section class="panel sftp-panel">
           <header class="panel-head">
             <div><span class="online-dot" :class="{ 'online-dot--muted': !workspaceStore.hasActiveHost }"></span><strong>SFTP 文件管理器</strong></div>
-            <div class="panel-actions file-actions"><button type="button">←</button><button type="button">↑</button><button type="button">↻</button><button type="button">⇧</button><button type="button">新建</button><button type="button">删除</button><input placeholder="搜索文件" /></div>
+            <div class="panel-actions"><span class="status-chip">{{ credentialLabel }}</span><span>{{ activeUserLabel }}</span></div>
           </header>
           <div class="workspace-sftp"><SftpView /></div>
         </section>
@@ -130,25 +130,16 @@ const disks = [
   display: none;
 }
 
-.workspace-terminal :deep(.content-grid),
-.workspace-sftp :deep(.content-grid) {
+.workspace-terminal :deep(.content-grid) {
   height: 100%;
   grid-template-columns: 260px minmax(0, 1fr);
   gap: 8px;
   padding: 8px;
 }
 
-.workspace-terminal :deep(.host-panel),
-.workspace-sftp :deep(.host-panel) {
-  min-width: 0;
-  gap: 8px;
-}
-
 .workspace-terminal :deep(.connect-card),
 .workspace-terminal :deep(.host-list-card),
-.workspace-terminal :deep(.quick-card),
-.workspace-sftp :deep(.connect-card),
-.workspace-sftp :deep(.host-list-card) {
+.workspace-terminal :deep(.quick-card) {
   border-color: rgba(148, 163, 184, 0.12);
   border-radius: 10px;
   background: rgba(2, 6, 23, 0.54);
@@ -171,13 +162,18 @@ const disks = [
   padding: 5px 8px;
 }
 
+.workspace-sftp :deep(.content-grid) {
+  height: 100%;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 8px;
+}
+
 .workspace-sftp :deep(.path-bar) {
   padding: 8px;
 }
 
 @media (max-width: 1260px) {
-  .workspace-terminal :deep(.content-grid),
-  .workspace-sftp :deep(.content-grid) {
+  .workspace-terminal :deep(.content-grid) {
     grid-template-columns: 220px minmax(0, 1fr);
   }
 }
