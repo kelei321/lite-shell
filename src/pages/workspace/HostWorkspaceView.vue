@@ -39,28 +39,7 @@
       </nav>
 
       <aside class="monitor-panel">
-        <section class="system-card system-summary">
-          <h2>系统信息</h2>
-          <dl>
-            <div><dt>主机名</dt><dd>{{ workspaceStore.hasActiveHost ? 'localhost' : '未连接' }}</dd></div>
-            <div><dt>IP 地址</dt><dd>{{ activeHostLabel }}</dd></div>
-            <div><dt>运行时间</dt><dd>187 天 02:40</dd></div>
-            <div><dt>连接用户</dt><dd>{{ workspaceStore.activeHost?.username || '-' }}</dd></div>
-            <div><dt>系统</dt><dd>CentOS Linux 7.9</dd></div>
-            <div><dt>内核</dt><dd>3.10.0-1160.el7.x86_64</dd></div>
-            <div><dt>架构</dt><dd>x86_64</dd></div>
-          </dl>
-        </section>
-
-        <section class="metric-card"><div class="metric-head"><span>CPU</span><strong>16 核</strong></div><div class="metric-body"><div class="ring ring--blue">14%</div><div class="metric-values"><span>用户 11.2%</span><span>系统 2.8%</span><span>空闲 86.0%</span></div></div><div class="sparkline sparkline--blue"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></section>
-        <section class="metric-card"><div class="metric-head"><span>内存</span><strong>31.1 GiB</strong></div><div class="metric-body"><div class="ring ring--cyan">66%</div><div class="metric-values"><span>已用 20.6 GiB</span><span>可用 10.5 GiB</span><span>总计 31.1 GiB</span></div></div><div class="progress"><span style="width: 66%"></span></div></section>
-        <section class="metric-card"><div class="metric-head"><span>交换</span><strong>4.0 GiB</strong></div><div class="metric-body"><div class="ring ring--green">25%</div><div class="metric-values"><span>已用 1.0 GiB</span><span>可用 3.0 GiB</span><span>总计 4.0 GiB</span></div></div></section>
-        <section class="metric-card"><div class="metric-head"><span>网络</span><strong>ens33</strong></div><div class="network-row"><span class="down">↓ 1.7 KB/s</span><span class="up">↑ 1.2 KB/s</span></div><div class="sparkline sparkline--green"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></section>
-
-        <section class="disk-card">
-          <div class="metric-head"><span>磁盘</span><strong>使用率</strong></div>
-          <div v-for="disk in disks" :key="disk.path" class="disk-row"><span>{{ disk.path }}</span><span>{{ disk.used }}</span><em :style="{ width: disk.percent }"></em></div>
-        </section>
+        <MonitorPanel />
       </aside>
 
       <section class="workspace-main">
@@ -94,6 +73,7 @@ import { computed } from 'vue';
 
 import SftpView from '@/pages/sftp/SftpView.vue';
 import TerminalView from '@/pages/terminal/TerminalView.vue';
+import MonitorPanel from '@/pages/workspace/components/MonitorPanel.vue';
 import { useWorkspaceStore } from '@/stores/workspace';
 
 const workspaceStore = useWorkspaceStore();
@@ -107,14 +87,6 @@ const activeUserLabel = computed(() => {
   if (!host) return '未连接';
   return `${host.username}@${host.host}`;
 });
-
-const disks = [
-  { path: '/', used: '15.6G / 19.6G', percent: '79%' },
-  { path: '/dev', used: '0 / 15.6G', percent: '0%' },
-  { path: '/dev/shm', used: '768K / 15.6G', percent: '1%' },
-  { path: '/run', used: '1.1G / 15.6G', percent: '7%' },
-  { path: '/boot', used: '825M / 1014M', percent: '81%' },
-];
 </script>
 
 <style scoped>
