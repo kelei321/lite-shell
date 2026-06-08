@@ -3,104 +3,89 @@
     <div v-if="statusMessage" class="monitor-empty">{{ statusMessage }}</div>
 
     <template v-else>
-      <section class="monitor-card">
-        <div class="monitor-card__head">
-          <h2>系统信息</h2>
-          <span>{{ refreshLabel }}</span>
+      <section class="compact-section compact-section--plain">
+        <div class="host-line">
+          <span>主机</span>
+          <strong>{{ valueOrDash(snapshot?.hostname) }}</strong>
         </div>
-        <dl class="monitor-grid">
-          <div class="monitor-row">
-            <dt>主机名</dt>
-            <dd>{{ valueOrDash(snapshot?.hostname) }}</dd>
-          </div>
-          <div class="monitor-row">
-            <dt>IP 地址</dt>
-            <dd>{{ activeHost?.host || '-' }}</dd>
-          </div>
-          <div class="monitor-row">
-            <dt>连接用户</dt>
-            <dd>{{ activeHost?.username || '-' }}</dd>
-          </div>
-          <div class="monitor-row">
-            <dt>系统</dt>
-            <dd>{{ valueOrDash(snapshot?.os) }}</dd>
-          </div>
-          <div class="monitor-row">
-            <dt>内核</dt>
-            <dd>{{ valueOrDash(snapshot?.kernel) }}</dd>
-          </div>
-          <div class="monitor-row">
-            <dt>运行时间</dt>
-            <dd>{{ valueOrDash(snapshot?.uptime) }}</dd>
-          </div>
-        </dl>
+        <div class="host-line">
+          <span>地址</span>
+          <strong>{{ activeHostLabel }}</strong>
+        </div>
+        <div class="host-line">
+          <span>系统</span>
+          <strong>{{ valueOrDash(snapshot?.os) }}</strong>
+        </div>
+        <div class="host-line">
+          <span>内核</span>
+          <strong>{{ valueOrDash(snapshot?.kernel) }}</strong>
+        </div>
       </section>
 
-      <section class="monitor-card">
-        <div class="monitor-card__head">
-          <h3>CPU</h3>
+      <section class="compact-section compact-section--plain">
+        <div class="metric-line metric-line--text">
+          <span>运行</span>
+          <strong>{{ valueOrDash(snapshot?.uptime) }}</strong>
+        </div>
+        <div class="metric-line metric-line--text">
+          <span>负载</span>
+          <strong>-</strong>
+        </div>
+        <div class="metric-line">
+          <span>CPU</span>
+          <div class="thin-progress">
+            <i class="thin-progress__bar thin-progress__bar--cpu" :style="{ width: progressWidth(snapshot?.cpuUsage) }"></i>
+          </div>
           <strong>{{ formatPercent(snapshot?.cpuUsage) }}</strong>
         </div>
-        <div class="monitor-progress">
-          <span class="monitor-progress__bar monitor-progress__bar--cpu" :style="{ width: progressWidth(snapshot?.cpuUsage) }"></span>
+        <div class="metric-line">
+          <span>内存</span>
+          <div class="thin-progress">
+            <i class="thin-progress__bar thin-progress__bar--memory" :style="{ width: progressWidth(snapshot?.memory.usagePercent) }"></i>
+          </div>
+          <strong>{{ formatMemoryPair(snapshot?.memory.usedMb, snapshot?.memory.totalMb) }}</strong>
+        </div>
+        <div class="metric-line">
+          <span>交换</span>
+          <div class="thin-progress">
+            <i class="thin-progress__bar thin-progress__bar--swap" :style="{ width: progressWidth(snapshot?.swap.usagePercent) }"></i>
+          </div>
+          <strong>{{ formatMemoryPair(snapshot?.swap.usedMb, snapshot?.swap.totalMb) }}</strong>
         </div>
       </section>
 
-      <section class="monitor-card">
-        <div class="monitor-card__head">
-          <h3>内存</h3>
-          <strong>{{ formatPercent(snapshot?.memory.usagePercent) }}</strong>
+      <section class="compact-section">
+        <div class="section-title">
+          <span>网络</span>
+          <strong>{{ refreshLabel }}</strong>
         </div>
-        <p class="monitor-muted">{{ formatMemory(snapshot?.memory.usedMb) }} / {{ formatMemory(snapshot?.memory.totalMb) }}</p>
-        <div class="monitor-progress">
-          <span class="monitor-progress__bar monitor-progress__bar--memory" :style="{ width: progressWidth(snapshot?.memory.usagePercent) }"></span>
-        </div>
-      </section>
-
-      <section class="monitor-card">
-        <div class="monitor-card__head">
-          <h3>Swap</h3>
-          <strong>{{ formatPercent(snapshot?.swap.usagePercent) }}</strong>
-        </div>
-        <p class="monitor-muted">{{ formatMemory(snapshot?.swap.usedMb) }} / {{ formatMemory(snapshot?.swap.totalMb) }}</p>
-        <div class="monitor-progress">
-          <span class="monitor-progress__bar monitor-progress__bar--swap" :style="{ width: progressWidth(snapshot?.swap.usagePercent) }"></span>
-        </div>
-      </section>
-
-      <section class="monitor-card">
-        <div class="monitor-card__head">
-          <h3>网络</h3>
-          <span>{{ snapshot?.networks.length || 0 }} 个网卡</span>
-        </div>
-        <div v-if="snapshot?.networks.length" class="monitor-list">
-          <div v-for="network in snapshot.networks" :key="network.name" class="network-item">
-            <span class="network-name">{{ network.name }}</span>
-            <span class="network-rate network-rate--down">↓ {{ getNetworkRate(network.name, 'rx') }}</span>
-            <span class="network-rate network-rate--up">↑ {{ getNetworkRate(network.name, 'tx') }}</span>
+        <div v-if="snapshot?.networks.length" class="network-table">
+          <div v-for="network in snapshot.networks" :key="network.name" class="network-row">
+            <span class="cell-ellipsis">{{ network.name }}</span>
+            <strong class="rate-down">↓ {{ getNetworkRate(network.name, 'rx') }}</strong>
+            <strong class="rate-up">↑ {{ getNetworkRate(network.name, 'tx') }}</strong>
           </div>
         </div>
-        <p v-else class="monitor-muted">-</p>
+        <p v-else class="compact-muted">-</p>
       </section>
 
-      <section class="monitor-card">
-        <div class="monitor-card__head">
-          <h3>磁盘</h3>
-          <span>使用率</span>
-        </div>
-        <div v-if="snapshot?.disks.length" class="monitor-list">
-          <div v-for="disk in snapshot.disks" :key="`${disk.filesystem}-${disk.mount}`" class="disk-item">
-            <div class="disk-item__head">
-              <span>{{ disk.mount || '-' }}</span>
-              <strong>{{ formatPercent(disk.usagePercent) }}</strong>
-            </div>
-            <p class="monitor-muted">{{ disk.used || '-' }} / {{ disk.total || '-' }} · 可用 {{ disk.available || '-' }}</p>
-            <div class="monitor-progress">
-              <span class="monitor-progress__bar monitor-progress__bar--disk" :style="{ width: progressWidth(disk.usagePercent) }"></span>
+      <section class="compact-section compact-section--table">
+        <div class="disk-table">
+          <div class="disk-table__head">
+            <span>路径</span>
+            <span>可用/大小</span>
+          </div>
+          <div v-if="snapshot?.disks.length" class="disk-table__body">
+            <div v-for="disk in snapshot.disks" :key="`${disk.filesystem}-${disk.mount}`" class="disk-row">
+              <span class="cell-ellipsis" :title="disk.mount">{{ disk.mount || '-' }}</span>
+              <strong>{{ formatDiskSize(disk) }}</strong>
+              <div class="disk-progress" :title="formatPercent(disk.usagePercent)">
+                <i :style="{ width: progressWidth(disk.usagePercent) }"></i>
+              </div>
             </div>
           </div>
+          <p v-else class="compact-muted">-</p>
         </div>
-        <p v-else class="monitor-muted">-</p>
       </section>
     </template>
   </div>
@@ -111,7 +96,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 
 import { useWorkspaceStore } from '@/stores/workspace';
-import type { MonitorSnapshot } from '@/types/monitor';
+import type { DiskSnapshot, MonitorSnapshot } from '@/types/monitor';
 
 const workspaceStore = useWorkspaceStore();
 
@@ -124,6 +109,11 @@ let timer: number | undefined;
 let requestVersion = 0;
 
 const activeHost = computed(() => workspaceStore.activeHost);
+const activeHostLabel = computed(() => {
+  const host = activeHost.value;
+  if (!host) return '-';
+  return `${host.username}@${host.host}`;
+});
 const statusMessage = computed(() => {
   if (!activeHost.value) return '请先连接 SSH 主机';
   if (!workspaceStore.hasCredential(activeHost.value.id)) return '当前主机未缓存认证';
@@ -133,7 +123,7 @@ const statusMessage = computed(() => {
 });
 const refreshLabel = computed(() => {
   if (!snapshot.value?.collectedAt) return '自动刷新';
-  return `刷新于 ${new Date(snapshot.value.collectedAt * 1000).toLocaleTimeString()}`;
+  return new Date(snapshot.value.collectedAt * 1000).toLocaleTimeString();
 });
 
 watch(
@@ -246,14 +236,23 @@ function progressWidth(value: number | undefined) {
 
 function formatMemory(value: number | undefined) {
   if (!value) return '-';
-  if (value < 1024) return `${value} MB`;
-  return `${(value / 1024).toFixed(1)} GB`;
+  if (value < 1024) return `${value}M`;
+  return `${(value / 1024).toFixed(1)}G`;
+}
+
+function formatMemoryPair(used: number | undefined, total: number | undefined) {
+  if (!total) return '-';
+  return `${formatMemory(used)} / ${formatMemory(total)}`;
+}
+
+function formatDiskSize(disk: DiskSnapshot) {
+  return `${disk.available || '-'} / ${disk.total || '-'}`;
 }
 
 function formatRate(bytesPerSecond: number) {
-  if (bytesPerSecond < 1024) return `${bytesPerSecond.toFixed(0)} B/s`;
-  if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(1)} KB/s`;
-  return `${(bytesPerSecond / 1024 / 1024).toFixed(1)} MB/s`;
+  if (bytesPerSecond < 1024) return `${bytesPerSecond.toFixed(0)}B/s`;
+  if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(1)}K/s`;
+  return `${(bytesPerSecond / 1024 / 1024).toFixed(1)}M/s`;
 }
 </script>
 
@@ -262,155 +261,200 @@ function formatRate(bytesPerSecond: number) {
   display: flex;
   min-height: 0;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
+  color: #dbeafe;
+  font-size: 12px;
 }
 
-.monitor-card,
+.compact-section,
 .monitor-empty {
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  border-radius: 12px;
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.82), rgba(8, 13, 23, 0.88));
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 6px;
+  background: rgba(2, 6, 23, 0.34);
 }
 
-.monitor-card {
-  padding: 12px;
+.compact-section {
+  overflow: hidden;
+}
+
+.compact-section--plain {
+  display: grid;
+  gap: 2px;
+  border-color: transparent;
+  background: transparent;
 }
 
 .monitor-empty {
   display: grid;
-  min-height: 180px;
+  min-height: 118px;
   place-items: center;
   color: #94a3b8;
-  padding: 18px;
+  padding: 12px;
   text-align: center;
 }
 
-.monitor-card__head,
-.disk-item__head,
-.network-item {
-  display: flex;
+.host-line,
+.metric-line,
+.section-title,
+.network-row,
+.disk-table__head,
+.disk-row {
+  display: grid;
   min-width: 0;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.monitor-card__head h2,
-.monitor-card__head h3 {
-  margin: 0;
-  color: #e5e7eb;
-  font-size: 15px;
-}
-
-.monitor-card__head span,
-.monitor-card__head strong,
-.disk-item__head strong {
-  color: #cbd5e1;
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.monitor-grid {
-  display: grid;
-  gap: 7px;
-  margin: 12px 0 0;
-}
-
-.monitor-row {
-  display: grid;
-  grid-template-columns: 72px minmax(0, 1fr);
   gap: 6px;
 }
 
-.monitor-row dt {
-  color: #64748b;
-  font-size: 12px;
+.host-line,
+.metric-line--text {
+  grid-template-columns: 34px minmax(0, 1fr);
 }
 
-.monitor-row dd,
-.network-name,
-.disk-item__head span {
+.host-line span,
+.metric-line span {
+  color: #cbd5e1;
+  white-space: nowrap;
+}
+
+.host-line strong,
+.metric-line strong,
+.section-title strong,
+.network-row strong,
+.disk-row strong {
   min-width: 0;
   overflow: hidden;
-  margin: 0;
-  color: #dbeafe;
-  font-size: 12px;
+  color: #e5e7eb;
+  font-size: 11px;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.monitor-muted {
-  overflow: hidden;
-  margin: 8px 0 0;
-  color: #94a3b8;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.metric-line {
+  grid-template-columns: 34px minmax(0, 1fr) 78px;
+  min-height: 18px;
 }
 
-.monitor-progress {
-  height: 5px;
+.thin-progress,
+.disk-progress {
+  height: 13px;
   overflow: hidden;
-  margin-top: 10px;
-  border-radius: 999px;
-  background: #1e293b;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  background: rgba(15, 23, 42, 0.84);
 }
 
-.monitor-progress__bar {
+.thin-progress__bar,
+.disk-progress i {
   display: block;
   height: 100%;
-  border-radius: inherit;
 }
 
-.monitor-progress__bar--cpu {
-  background: linear-gradient(90deg, #3b82f6, #38bdf8);
+.thin-progress__bar--cpu {
+  background: rgba(134, 239, 172, 0.72);
 }
 
-.monitor-progress__bar--memory {
-  background: linear-gradient(90deg, #22c55e, #38bdf8);
+.thin-progress__bar--memory {
+  background: rgba(251, 191, 36, 0.44);
 }
 
-.monitor-progress__bar--swap {
-  background: linear-gradient(90deg, #a78bfa, #60a5fa);
+.thin-progress__bar--swap {
+  background: rgba(96, 165, 250, 0.44);
 }
 
-.monitor-progress__bar--disk {
+.section-title {
+  grid-template-columns: minmax(0, 1fr) auto;
+  height: 22px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(30, 41, 59, 0.7);
+  color: #e5e7eb;
+  padding: 0 6px;
+}
+
+.section-title span,
+.disk-table__head span {
+  font-weight: 600;
+}
+
+.network-table {
+  display: grid;
+}
+
+.network-row {
+  grid-template-columns: minmax(0, 1fr) 58px 58px;
+  min-height: 22px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  padding: 0 6px;
+}
+
+.network-row:last-child {
+  border-bottom: 0;
+}
+
+.rate-down {
+  color: #86efac;
+  text-align: right;
+}
+
+.rate-up {
+  color: #fca5a5;
+  text-align: right;
+}
+
+.disk-table {
+  display: grid;
+  min-width: 0;
+}
+
+.disk-table__head {
+  grid-template-columns: minmax(0, 1fr) 82px;
+  height: 24px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(30, 41, 59, 0.7);
+  color: #e5e7eb;
+  padding: 0 6px;
+}
+
+.disk-table__body {
+  display: grid;
+}
+
+.disk-row {
+  grid-template-columns: minmax(0, 1fr) 82px;
+  min-height: 22px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.06);
+  padding: 2px 6px 3px;
+}
+
+.disk-row:nth-child(even) {
+  background: rgba(148, 163, 184, 0.04);
+}
+
+.disk-row strong {
+  text-align: right;
+}
+
+.disk-progress {
+  grid-column: 1 / -1;
+  height: 3px;
+  border: 0;
+  background: rgba(30, 41, 59, 0.8);
+}
+
+.disk-progress i {
   background: linear-gradient(90deg, #22c55e, #f59e0b);
 }
 
-.monitor-list {
-  display: grid;
-  gap: 10px;
-  margin-top: 10px;
-}
-
-.network-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 72px 72px;
-  align-items: center;
-  border-top: 1px solid rgba(148, 163, 184, 0.1);
-  padding-top: 8px;
-}
-
-.network-rate {
-  font-size: 11px;
-  text-align: right;
+.cell-ellipsis,
+.compact-muted {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.network-rate--down {
-  color: #22c55e;
-}
-
-.network-rate--up {
-  color: #60a5fa;
-}
-
-.disk-item {
-  min-width: 0;
-  border-top: 1px solid rgba(148, 163, 184, 0.1);
-  padding-top: 8px;
+.compact-muted {
+  margin: 0;
+  color: #94a3b8;
+  padding: 6px;
 }
 </style>
