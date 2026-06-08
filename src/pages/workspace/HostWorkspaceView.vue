@@ -114,5 +114,67 @@ const disks = [
 </script>
 
 <style scoped>
-/* Existing large workspace layout styles were preserved in the first layout commit. */
+.workspace-terminal :deep(.terminal-layout),
+.workspace-sftp :deep(.sftp-layout) {
+  height: 100%;
+  padding: 0;
+  gap: 0;
+}
+
+.workspace-terminal :deep(.toolbar),
+.workspace-sftp :deep(.toolbar) {
+  display: none;
+}
+
+.workspace-terminal :deep(.content-grid),
+.workspace-sftp :deep(.content-grid) {
+  height: 100%;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px;
+}
+
+.workspace-terminal :deep(.host-panel),
+.workspace-sftp :deep(.host-panel) {
+  min-width: 0;
+  gap: 8px;
+}
+
+.workspace-terminal :deep(.connect-card),
+.workspace-terminal :deep(.host-list-card),
+.workspace-terminal :deep(.quick-card),
+.workspace-sftp :deep(.connect-card),
+.workspace-sftp :deep(.host-list-card) {
+  border-color: rgba(148, 163, 184, 0.12);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.54);
+  padding: 10px;
+}
+
+.workspace-terminal :deep(.workspace-card),
+.workspace-sftp :deep(.browser-card) {
+  border-color: rgba(148, 163, 184, 0.12);
+  border-radius: 10px;
+  background: rgba(2, 6, 23, 0.68);
+}
+
+.workspace-terminal :deep(.terminal-card) {
+  padding: 8px;
+}
+
+.workspace-terminal :deep(.tabs-bar) {
+  min-height: 36px;
+  padding: 5px 8px;
+}
+
+.workspace-sftp :deep(.path-bar) {
+  padding: 8px;
+}
+
+@media (max-width: 1260px) {
+  .workspace-terminal :deep(.content-grid),
+  .workspace-sftp :deep(.content-grid) {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+}
 </style>
