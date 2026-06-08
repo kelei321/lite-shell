@@ -107,6 +107,7 @@ const errorMessage = ref('');
 
 let timer: number | undefined;
 let requestVersion = 0;
+let inFlight = false;
 
 const activeHost = computed(() => workspaceStore.activeHost);
 const activeHostLabel = computed(() => {
@@ -137,6 +138,8 @@ watch(
 
 onBeforeUnmount(() => {
   stopMonitor();
+  requestVersion += 1;
+  inFlight = false;
 });
 
 function restartMonitor() {
@@ -145,6 +148,7 @@ function restartMonitor() {
   previousSnapshot.value = null;
   loading.value = false;
   errorMessage.value = '';
+  inFlight = false;
   requestVersion += 1;
 
   const host = workspaceStore.activeHost;
@@ -166,12 +170,15 @@ function stopMonitor() {
 }
 
 async function loadSnapshot() {
+  if (inFlight) return;
+
   const version = ++requestVersion;
   const host = workspaceStore.activeHost;
   const credential = host ? workspaceStore.getCredential(host.id) : undefined;
 
   if (!host || !credential?.password) return;
 
+  inFlight = true;
   loading.value = true;
   errorMessage.value = '';
 
@@ -199,6 +206,7 @@ async function loadSnapshot() {
   } finally {
     if (version === requestVersion) {
       loading.value = false;
+      inFlight = false;
     }
   }
 }
