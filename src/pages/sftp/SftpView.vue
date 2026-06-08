@@ -16,6 +16,29 @@
           {{ statusNotice }}
         </div>
 
+        <div class="action-bar">
+          <button class="action-button" :disabled="!canRunConnectedAction" type="button" @click="uploadFile">
+            上传
+          </button>
+          <button class="action-button" :disabled="!canDownload" type="button" @click="downloadFile">
+            下载
+          </button>
+          <button class="action-button" :disabled="!canRunConnectedAction" type="button" @click="createDirectory">
+            新建目录
+          </button>
+          <button class="action-button" :disabled="!canRunSelectedAction" type="button" @click="renameItem">
+            重命名
+          </button>
+          <button class="action-button action-button--danger" :disabled="!canRunSelectedAction" type="button" @click="deleteItem">
+            删除
+          </button>
+          <button class="action-button" :disabled="autoConnecting || loading || actionLoading" type="button" @click="refresh">
+            刷新
+          </button>
+          <span v-if="actionLoading" class="action-message">{{ actionStatusText }}</span>
+          <span v-else-if="actionMessage" class="action-message">{{ actionMessage }}</span>
+        </div>
+
         <div class="path-bar">
           <button class="ghost-button" :disabled="!canBrowse || currentPath === '/'" type="button" @click="goParent">
             上级
@@ -51,7 +74,8 @@
                 <tr
                   v-for="file in files"
                   :key="file.path"
-                  :class="{ 'file-row--dir': file.isDir }"
+                  :class="{ 'file-row--dir': file.isDir, 'file-row--selected': selectedItem?.path === file.path }"
+                  @click="selectItem(file)"
                   @dblclick="openItem(file)"
                 >
                   <td class="name-cell">
@@ -71,8 +95,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, shallowRef, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { open, save } from '@tauri-apps/plugin-dialog';
 
 import { type WorkspaceCredential, type WorkspaceHost, useWorkspaceStore } from '@/stores/workspace';
 
@@ -96,6 +121,10 @@ interface SftpSessionState {
 const workspaceStore = useWorkspaceStore();
 
 const sessionsByHostId = shallowRef<Record<string, SftpSessionState>>({});
+const selectedItem = ref<RemoteFileItem | null>(null);
+const actionLoading = ref(false);
+const actionMessage = ref('');
+const actionStatusText = ref('');
 
 const activeHost = computed(() => workspaceStore.activeHost);
 const cachedCredential = computed(() =>
@@ -115,6 +144,15 @@ const loading = computed(() => Boolean(currentSession.value?.loading));
 const autoConnecting = computed(() => Boolean(currentSession.value?.connecting));
 const errorMessage = computed(() => currentSession.value?.errorMessage || '');
 const canBrowse = computed(() => Boolean(connectionId.value && !autoConnecting.value));
+const canRunConnectedAction = computed(() =>
+  Boolean(connectionId.value && !autoConnecting.value && !loading.value && !actionLoading.value),
+);
+const canRunSelectedAction = computed(() =>
+  Boolean(canRunConnectedAction.value && selectedItem.value),
+);
+const canDownload = computed(() =>
+  Boolean(canRunConnectedAction.value && selectedItem.value && !selectedItem.value.isDir),
+);
 const activeHostLabel = computed(() => {
   const host = activeHost.value;
   if (!host) return '';
@@ -146,6 +184,14 @@ watch(
     void cleanupSessionsWithoutCredential();
   },
   { immediate: true },
+);
+
+watch(
+  () => activeHost.value?.id || '',
+  () => {
+    selectedItem.value = null;
+    actionMessage.value = '';
+  },
 );
 
 onBeforeUnmount(() => {
@@ -255,6 +301,10 @@ async function loadDir(path: string, hostId = activeHost.value?.id) {
       loading: false,
       errorMessage: '',
     });
+
+    if (activeHost.value?.id === hostId) {
+      selectedItem.value = null;
+    }
   } catch {
     const latest = sessionsByHostId.value[hostId];
     if (!latest || latest.connectionId !== expectedConnectionId) return;
@@ -353,6 +403,7 @@ async function closeAllSessions() {
 function openItem(file: RemoteFileItem) {
   const hostId = activeHost.value?.id;
   if (!hostId || !file.isDir || getCurrentSession()?.loading) return;
+  selectedItem.value = null;
   void loadDir(file.path, hostId);
 }
 
@@ -360,6 +411,7 @@ function goParent() {
   const hostId = activeHost.value?.id;
   const path = currentPath.value;
   if (!hostId || path === '/') return;
+  selectedItem.value = null;
   void loadDir(getParentPath(path), hostId);
 }
 
@@ -375,6 +427,225 @@ function refresh() {
   }
 
   void loadDir(session.currentPath || '/', host.id);
+}
+
+function selectItem(file: RemoteFileItem) {
+  selectedItem.value = file;
+  actionMessage.value = '';
+}
+
+async function uploadFile() {
+  const snapshot = await ensureActiveSession();
+  if (!snapshot) return;
+
+  const localPath = await open({
+    multiple: false,
+    directory: false,
+  });
+
+  if (!localPath || Array.isArray(localPath)) return;
+
+  const fileName = getLocalFileName(localPath);
+  if (!fileName) {
+    actionMessage.value = '上传失败，请检查本地文件。';
+    return;
+  }
+
+  const remotePath = joinRemotePath(snapshot.currentPath, fileName);
+  const overwrite = files.value.some((file) => file.path === remotePath);
+
+  if (overwrite && !window.confirm(`远程文件 ${fileName} 已存在，是否覆盖？`)) {
+    return;
+  }
+
+  await runSftpAction({
+    snapshot,
+    loadingText: '正在上传...',
+    successText: '上传完成。',
+    failureText: '上传失败，请检查本地文件或远程目录权限。',
+    action: () =>
+      invoke('sftp_upload_file', {
+        connectionId: snapshot.connectionId,
+        localPath,
+        remotePath,
+      }),
+  });
+}
+
+async function downloadFile() {
+  const item = selectedItem.value;
+  if (!item || item.isDir) return;
+
+  const snapshot = await ensureActiveSession();
+  if (!snapshot) return;
+
+  const localPath = await save({
+    defaultPath: item.name,
+  });
+
+  if (!localPath) return;
+
+  await runSftpAction({
+    snapshot,
+    loadingText: '正在下载...',
+    successText: '下载完成。',
+    failureText: '下载失败，请检查远程文件或本地保存路径。',
+    action: () =>
+      invoke('sftp_download_file', {
+        connectionId: snapshot.connectionId,
+        remotePath: item.path,
+        localPath,
+      }),
+  });
+}
+
+async function createDirectory() {
+  const snapshot = await ensureActiveSession();
+  if (!snapshot) return;
+
+  const dirName = window.prompt('请输入目录名');
+  const normalizedName = normalizeRemoteName(dirName);
+
+  if (!normalizedName) return;
+
+  await runSftpAction({
+    snapshot,
+    loadingText: '正在创建目录...',
+    successText: '目录创建完成。',
+    failureText: '新建目录失败，请检查远程目录权限。',
+    action: () =>
+      invoke('sftp_mkdir', {
+        connectionId: snapshot.connectionId,
+        path: joinRemotePath(snapshot.currentPath, normalizedName),
+      }),
+  });
+}
+
+async function renameItem() {
+  const item = selectedItem.value;
+  if (!item) return;
+
+  const snapshot = await ensureActiveSession();
+  if (!snapshot) return;
+
+  const newName = window.prompt('请输入新名称', item.name);
+  const normalizedName = normalizeRemoteName(newName);
+
+  if (!normalizedName || normalizedName === item.name) return;
+
+  await runSftpAction({
+    snapshot,
+    loadingText: '正在重命名...',
+    successText: '重命名完成。',
+    failureText: '重命名失败，请检查目标名称或目录权限。',
+    action: () =>
+      invoke('sftp_rename', {
+        connectionId: snapshot.connectionId,
+        oldPath: item.path,
+        newPath: joinRemotePath(snapshot.currentPath, normalizedName),
+      }),
+  });
+}
+
+async function deleteItem() {
+  const item = selectedItem.value;
+  if (!item) return;
+
+  const snapshot = await ensureActiveSession();
+  if (!snapshot) return;
+
+  const typeText = item.isDir ? '空目录' : '文件';
+  if (!window.confirm(`确认删除${typeText} ${item.name}？`)) return;
+
+  await runSftpAction({
+    snapshot,
+    loadingText: '正在删除...',
+    successText: '删除完成。',
+    failureText: '删除失败，请确认目录为空或有足够权限。',
+    action: () =>
+      invoke('sftp_delete', {
+        connectionId: snapshot.connectionId,
+        path: item.path,
+        isDir: item.isDir,
+      }),
+  });
+}
+
+async function ensureActiveSession() {
+  let snapshot = getActiveSessionSnapshot();
+
+  if (!snapshot) {
+    await syncSftpWithWorkspaceHost();
+    snapshot = getActiveSessionSnapshot();
+  }
+
+  if (!snapshot) {
+    actionMessage.value = activeHost.value ? 'SFTP 尚未连接。' : '请先连接 SSH 主机。';
+  }
+
+  return snapshot;
+}
+
+function getActiveSessionSnapshot() {
+  const host = activeHost.value;
+  const session = currentSession.value;
+
+  if (!host || !session?.connectionId) return undefined;
+
+  return {
+    hostId: host.id,
+    connectionId: session.connectionId,
+    currentPath: session.currentPath,
+  };
+}
+
+async function runSftpAction(options: {
+  snapshot: { hostId: string; connectionId: string; currentPath: string };
+  loadingText: string;
+  successText: string;
+  failureText: string;
+  action: () => Promise<unknown>;
+}) {
+  actionLoading.value = true;
+  actionStatusText.value = options.loadingText;
+  actionMessage.value = '';
+
+  try {
+    await options.action();
+
+    const latest = sessionsByHostId.value[options.snapshot.hostId];
+    if (!latest || latest.connectionId !== options.snapshot.connectionId) return;
+
+    await loadDir(options.snapshot.currentPath, options.snapshot.hostId);
+
+    if (activeHost.value?.id !== options.snapshot.hostId) return;
+
+    selectedItem.value = null;
+    actionMessage.value = options.successText;
+  } catch {
+    const latest = sessionsByHostId.value[options.snapshot.hostId];
+    if (!latest || latest.connectionId !== options.snapshot.connectionId) return;
+    if (activeHost.value?.id !== options.snapshot.hostId) return;
+    actionMessage.value = options.failureText;
+  } finally {
+    actionLoading.value = false;
+    actionStatusText.value = '';
+  }
+}
+
+function joinRemotePath(basePath: string, name: string) {
+  if (basePath === '/') return `/${name}`;
+  return `${basePath.replace(/\/+$/, '')}/${name}`;
+}
+
+function normalizeRemoteName(value: string | null) {
+  const name = value?.trim() || '';
+  if (!name || name.includes('/') || name.includes('\\')) return '';
+  return name;
+}
+
+function getLocalFileName(path: string) {
+  return path.split(/[\\/]/).pop() || '';
 }
 
 function getParentPath(path: string) {
@@ -467,6 +738,49 @@ function formatSize(size: number) {
   color: #bbf7d0;
 }
 
+.action-bar {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #1e293b;
+  padding: 8px 10px;
+}
+
+.action-button {
+  height: 32px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #162033;
+  color: #e5e7eb;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.action-button:hover:not(:disabled) {
+  border-color: #38bdf8;
+  color: #f8fafc;
+}
+
+.action-button--danger:hover:not(:disabled) {
+  border-color: #f87171;
+}
+
+.action-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.action-message {
+  min-width: 0;
+  overflow: hidden;
+  color: #93c5fd;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .path-bar {
   display: grid;
   grid-template-columns: 76px minmax(0, 1fr) 76px;
@@ -555,12 +869,17 @@ function formatSize(size: number) {
   font-size: 13px;
 }
 
-.file-row--dir {
+.file-table tbody tr {
   cursor: pointer;
 }
 
-.file-row--dir:hover {
+.file-table tbody tr:hover {
   background: #111827;
+}
+
+.file-row--selected,
+.file-row--selected:hover {
+  background: rgba(14, 165, 233, 0.18);
 }
 
 .name-cell {

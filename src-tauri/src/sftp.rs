@@ -2,7 +2,14 @@ use anyhow::{anyhow, Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use ssh2::{Session, Sftp};
-use std::{collections::HashMap, net::TcpStream, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs,
+    io::{Read, Write},
+    net::TcpStream,
+    path::Path,
+    sync::Arc,
+};
 use tauri::State;
 use uuid::Uuid;
 
@@ -73,18 +80,64 @@ pub fn sftp_close(state: State<SftpState>, connection_id: String) -> Result<(), 
     Ok(())
 }
 
+#[tauri::command]
+pub fn sftp_download_file(
+    state: State<SftpState>,
+    connection_id: String,
+    remote_path: String,
+    local_path: String,
+) -> Result<(), String> {
+    inner_sftp_download_file(&state, &connection_id, &remote_path, &local_path)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn sftp_upload_file(
+    state: State<SftpState>,
+    connection_id: String,
+    local_path: String,
+    remote_path: String,
+) -> Result<(), String> {
+    inner_sftp_upload_file(&state, &connection_id, &local_path, &remote_path)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn sftp_mkdir(
+    state: State<SftpState>,
+    connection_id: String,
+    path: String,
+) -> Result<(), String> {
+    inner_sftp_mkdir(&state, &connection_id, &path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn sftp_delete(
+    state: State<SftpState>,
+    connection_id: String,
+    path: String,
+    is_dir: bool,
+) -> Result<(), String> {
+    inner_sftp_delete(&state, &connection_id, &path, is_dir).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn sftp_rename(
+    state: State<SftpState>,
+    connection_id: String,
+    old_path: String,
+    new_path: String,
+) -> Result<(), String> {
+    inner_sftp_rename(&state, &connection_id, &old_path, &new_path)
+        .map_err(|error| error.to_string())
+}
+
 fn inner_sftp_list_dir(
     state: State<SftpState>,
     connection_id: String,
     path: String,
 ) -> Result<Vec<RemoteFileItem>> {
-    let handle = {
-        let sessions = state.sessions.lock();
-        sessions
-            .get(&connection_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("sftp connection not found"))?
-    };
+    let handle = get_sftp_handle(&state, &connection_id)?;
 
     let sftp = handle.sftp.lock();
     let entries = sftp
@@ -118,6 +171,93 @@ fn inner_sftp_list_dir(
     });
 
     Ok(items)
+}
+
+fn inner_sftp_download_file(
+    state: &SftpState,
+    connection_id: &str,
+    remote_path: &str,
+    local_path: &str,
+) -> Result<()> {
+    let handle = get_sftp_handle(state, connection_id)?;
+    let sftp = handle.sftp.lock();
+    let mut remote_file = sftp
+        .open(Path::new(remote_path))
+        .with_context(|| format!("open remote file failed: {remote_path}"))?;
+    let mut buffer = Vec::new();
+    remote_file
+        .read_to_end(&mut buffer)
+        .with_context(|| format!("read remote file failed: {remote_path}"))?;
+    fs::write(local_path, buffer).with_context(|| format!("write local file failed: {local_path}"))?;
+    Ok(())
+}
+
+fn inner_sftp_upload_file(
+    state: &SftpState,
+    connection_id: &str,
+    local_path: &str,
+    remote_path: &str,
+) -> Result<()> {
+    let handle = get_sftp_handle(state, connection_id)?;
+    let buffer =
+        fs::read(local_path).with_context(|| format!("read local file failed: {local_path}"))?;
+    let sftp = handle.sftp.lock();
+    let mut remote_file = sftp
+        .create(Path::new(remote_path))
+        .with_context(|| format!("create remote file failed: {remote_path}"))?;
+    remote_file
+        .write_all(&buffer)
+        .with_context(|| format!("write remote file failed: {remote_path}"))?;
+    Ok(())
+}
+
+fn inner_sftp_mkdir(state: &SftpState, connection_id: &str, path: &str) -> Result<()> {
+    let handle = get_sftp_handle(state, connection_id)?;
+    let sftp = handle.sftp.lock();
+    sftp.mkdir(Path::new(path), 0o755)
+        .with_context(|| format!("create remote directory failed: {path}"))?;
+    Ok(())
+}
+
+fn inner_sftp_delete(
+    state: &SftpState,
+    connection_id: &str,
+    path: &str,
+    is_dir: bool,
+) -> Result<()> {
+    let handle = get_sftp_handle(state, connection_id)?;
+    let sftp = handle.sftp.lock();
+
+    if is_dir {
+        sftp.rmdir(Path::new(path))
+            .with_context(|| format!("delete remote directory failed: {path}"))?;
+    } else {
+        sftp.unlink(Path::new(path))
+            .with_context(|| format!("delete remote file failed: {path}"))?;
+    }
+
+    Ok(())
+}
+
+fn inner_sftp_rename(
+    state: &SftpState,
+    connection_id: &str,
+    old_path: &str,
+    new_path: &str,
+) -> Result<()> {
+    let handle = get_sftp_handle(state, connection_id)?;
+    let sftp = handle.sftp.lock();
+    sftp.rename(Path::new(old_path), Path::new(new_path), None)
+        .with_context(|| format!("rename remote path failed: {old_path} -> {new_path}"))?;
+    Ok(())
+}
+
+fn get_sftp_handle(state: &SftpState, connection_id: &str) -> Result<Arc<SftpHandle>> {
+    let sessions = state.sessions.lock();
+    sessions
+        .get(connection_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("sftp connection not found"))
 }
 
 fn create_session(payload: &SftpConnectPayload) -> Result<Session> {

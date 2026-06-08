@@ -8,6 +8,7 @@ use ssh::SshState;
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(SshState::default())
         .manage(SftpState::default())
@@ -19,6 +20,11 @@ fn main() {
             sftp::sftp_connect,
             sftp::sftp_list_dir,
             sftp::sftp_close,
+            sftp::sftp_download_file,
+            sftp::sftp_upload_file,
+            sftp::sftp_mkdir,
+            sftp::sftp_delete,
+            sftp::sftp_rename,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LiteShell");
