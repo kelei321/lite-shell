@@ -306,7 +306,7 @@ async function connectTab(tab: TerminalTab, password: string) {
   }
 }
 
-function setTerminalHost(tabId: string, element: Element | null) {
+function setTerminalHost(tabId: string, element: unknown) {
   if (!(element instanceof HTMLDivElement)) return;
 
   terminalHosts.set(tabId, element);
