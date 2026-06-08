@@ -13,6 +13,7 @@
         <button class="host-tab" :class="{ 'host-tab--active': workspaceStore.hasActiveHost }" type="button">
           <span class="online-dot" :class="{ 'online-dot--muted': !workspaceStore.hasActiveHost }"></span>
           <span>{{ activeHostLabel }}</span>
+          <span class="auth-state">{{ credentialLabel }}</span>
           <span class="tab-close">×</span>
         </button>
         <button class="tab-add" type="button">+</button>
@@ -66,7 +67,7 @@
         <section class="panel terminal-panel">
           <header class="panel-head">
             <div><span class="online-dot" :class="{ 'online-dot--muted': !workspaceStore.hasActiveHost }"></span><strong>终端</strong></div>
-            <div class="panel-actions"><span class="status-chip">{{ workspaceStore.hasActiveHost ? '已连接' : '未连接' }}</span><span class="status-chip">SSH</span><span>{{ activeUserLabel }}</span><button type="button">⚡</button><button type="button">⧉</button><button type="button">⋯</button></div>
+            <div class="panel-actions"><span class="status-chip">{{ workspaceStore.hasActiveHost ? '已连接' : '未连接' }}</span><span class="status-chip">{{ credentialLabel }}</span><span class="status-chip">SSH</span><span>{{ activeUserLabel }}</span><button type="button">⚡</button><button type="button">⧉</button><button type="button">⋯</button></div>
           </header>
           <div class="workspace-terminal"><TerminalView /></div>
           <div class="terminal-hints">命令提示：Ctrl + Shift + V 粘贴剪贴板　|　Alt + ↑/↓ 历史命令　|　Ctrl + L 清屏</div>
@@ -84,7 +85,7 @@
       </section>
     </section>
 
-    <footer class="statusbar"><span>LiteShell 1.0.0</span><span class="pro-badge">专业版</span><span>连接：{{ workspaceStore.hasActiveHost ? 1 : 0 }}</span><span>传输：↑ 1.2 KB/s ↓ 1.7 KB/s</span><span>SSH 加密：AES-256-CTR 🔒</span><span>会话保活：● 60s</span><span class="statusbar-spacer"></span><span>快捷命令</span><span>工具箱</span><span>设置</span></footer>
+    <footer class="statusbar"><span>LiteShell 1.0.0</span><span class="pro-badge">专业版</span><span>连接：{{ workspaceStore.hasActiveHost ? 1 : 0 }}</span><span>{{ credentialLabel }}</span><span>传输：↑ 1.2 KB/s ↓ 1.7 KB/s</span><span>SSH 加密：AES-256-CTR 🔒</span><span>会话保活：● 60s</span><span class="statusbar-spacer"></span><span>快捷命令</span><span>工具箱</span><span>设置</span></footer>
   </main>
 </template>
 
@@ -98,6 +99,9 @@ import { useWorkspaceStore } from '@/stores/workspace';
 const workspaceStore = useWorkspaceStore();
 
 const activeHostLabel = computed(() => workspaceStore.activeHostLabel);
+const credentialLabel = computed(() =>
+  workspaceStore.activeHostHasCredential ? '认证：内存' : '认证：未缓存',
+);
 const activeUserLabel = computed(() => {
   const host = workspaceStore.activeHost;
   if (!host) return '未连接';

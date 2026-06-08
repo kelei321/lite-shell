@@ -24,6 +24,10 @@
             已同步当前工作台主机：{{ workspaceStore.activeHost?.username }}@{{ workspaceStore.activeHost?.host }}:{{ workspaceStore.activeHost?.port }}
           </p>
 
+          <p class="credential-tip" :class="{ 'credential-tip--cached': canUseCachedCredential }">
+            {{ canUseCachedCredential ? '已复用当前 SSH 认证，可直接连接 SFTP。' : '请输入密码连接 SFTP。' }}
+          </p>
+
           <label>
             <span>名称</span>
             <input v-model.trim="form.name" autocomplete="off" placeholder="生产服务器" />
@@ -46,7 +50,12 @@
 
           <label>
             <span>密码</span>
-            <input v-model="form.password" autocomplete="current-password" type="password" />
+            <input
+              v-model="form.password"
+              autocomplete="current-password"
+              :placeholder="canUseCachedCredential ? '已复用 SSH 认证，无需输入' : ''"
+              type="password"
+            />
           </label>
 
           <button class="primary-button" :disabled="!canConnect || connecting" type="submit">
@@ -162,8 +171,18 @@ const connecting = ref(false);
 const loading = ref(false);
 const errorMessage = ref('');
 
+const cachedCredential = computed(() =>
+  form.id ? workspaceStore.getCredential(form.id) : undefined,
+);
+const canUseCachedCredential = computed(() => Boolean(cachedCredential.value?.password));
 const canConnect = computed(() =>
-  Boolean(form.host.trim() && form.username.trim() && form.password && !loading.value),
+  Boolean(
+    form.host.trim()
+      && form.username.trim()
+      && (cachedCredential.value?.password || form.password)
+      && !loading.value
+      && !connecting.value,
+  ),
 );
 const canBrowse = computed(() => Boolean(connectionId.value && !connecting.value));
 const statusText = computed(() => {
@@ -208,7 +227,8 @@ function selectHost(host: HostProfile) {
 async function connectSftp() {
   if (!canConnect.value || connecting.value) return;
 
-  const password = form.password;
+  const password = cachedCredential.value?.password || form.password;
+  form.password = '';
   connecting.value = true;
   errorMessage.value = '';
 
@@ -228,11 +248,10 @@ async function connectSftp() {
 
     connectionId.value = id;
     currentPath.value = '/';
-    form.password = '';
     if (form.id) hostStore.touchHost(form.id);
     await loadDir('/');
-  } catch (error) {
-    errorMessage.value = `SFTP 连接失败：${String(error)}`;
+  } catch {
+    errorMessage.value = 'SFTP 连接失败，请检查主机、用户或认证信息。';
     connectionId.value = '';
     files.value = [];
   } finally {
@@ -254,9 +273,9 @@ async function loadDir(path: string) {
 
     files.value = items;
     currentPath.value = path;
-  } catch (error) {
+  } catch {
     files.value = [];
-    errorMessage.value = `目录加载失败：${String(error)}`;
+    errorMessage.value = '目录加载失败，请检查连接状态或目录权限。';
   } finally {
     loading.value = false;
   }
@@ -276,9 +295,9 @@ async function closeSftp(options: { silent?: boolean } = {}) {
 
   try {
     await invoke('sftp_close', { connectionId: id });
-  } catch (error) {
+  } catch {
     if (!options.silent) {
-      errorMessage.value = `SFTP 关闭失败：${String(error)}`;
+      errorMessage.value = 'SFTP 关闭失败。';
     }
   }
 }
@@ -424,6 +443,23 @@ function formatSize(size: number) {
   padding: 8px 10px;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.credential-tip {
+  margin: 0;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #cbd5e1;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.credential-tip--cached {
+  border-color: rgba(34, 197, 94, 0.2);
+  background: rgba(34, 197, 94, 0.08);
+  color: #bbf7d0;
 }
 
 .connect-card input {

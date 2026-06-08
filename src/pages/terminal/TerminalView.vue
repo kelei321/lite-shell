@@ -134,8 +134,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', handleWindowResize);
   for (const tab of tabs.value) {
     if (tab.sessionId) void invoke('ssh_close', { id: tab.sessionId });
+    workspaceStore.clearCredential(tab.hostId);
     tab.terminal?.dispose();
   }
+  workspaceStore.clearAllCredentials();
 });
 
 function resetForm() {
@@ -211,11 +213,20 @@ async function connectTab(tab: TerminalTab, host: HostProfile, password: string)
     tab.lastRows = terminal.rows;
     tab.statusText = '已连接';
     workspaceStore.setActiveHost(host);
+    workspaceStore.setCredential({
+      hostId: host.id,
+      host: host.host,
+      port: host.port,
+      username: host.username,
+      password,
+      source: 'ssh',
+      createdAt: Date.now(),
+    });
     terminal.writeln('Connected.');
     terminal.focus();
-  } catch (error) {
+  } catch {
     tab.statusText = '连接失败';
-    terminal.writeln(`Connect failed: ${String(error)}`);
+    terminal.writeln('Connect failed.');
   } finally {
     tab.connecting = false;
     connecting.value = tabs.value.some((item) => item.connecting);
@@ -265,14 +276,15 @@ async function closeTab(tabId: string) {
   if (index < 0) return;
   const tab = tabs.value[index];
   if (tab.sessionId) await invoke('ssh_close', { id: tab.sessionId });
+  workspaceStore.clearCredential(tab.hostId);
   terminalHosts.delete(tab.id);
   tab.terminal?.dispose();
   tabs.value.splice(index, 1);
-  if (workspaceStore.activeHost?.id === tab.hostId) workspaceStore.clearActiveHost(tab.hostId);
   if (activeTabId.value === tabId) {
     const next = tabs.value[Math.max(0, index - 1)];
     activeTabId.value = next?.id || '';
     if (next) workspaceStore.setActiveHost({ id: next.hostId, name: next.title, host: next.host, port: next.port, username: next.username });
+    else workspaceStore.clearActiveHost(tab.hostId);
     scheduleActiveTabRefresh();
   }
 }
