@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use ssh2::{Session, Sftp};
 use std::{
     collections::HashMap,
-    fs,
-    io::{Read, Write},
+    fs::File,
+    io::{self, BufReader, BufWriter},
     net::TcpStream,
     path::Path,
     sync::Arc,
@@ -184,11 +184,12 @@ fn inner_sftp_download_file(
     let mut remote_file = sftp
         .open(Path::new(remote_path))
         .with_context(|| format!("open remote file failed: {remote_path}"))?;
-    let mut buffer = Vec::new();
-    remote_file
-        .read_to_end(&mut buffer)
-        .with_context(|| format!("read remote file failed: {remote_path}"))?;
-    fs::write(local_path, buffer).with_context(|| format!("write local file failed: {local_path}"))?;
+    let local_file = File::create(local_path)
+        .with_context(|| format!("create local file failed: {local_path}"))?;
+    let mut writer = BufWriter::new(local_file);
+    io::copy(&mut remote_file, &mut writer).with_context(|| {
+        format!("copy remote file to local failed: {remote_path} -> {local_path}")
+    })?;
     Ok(())
 }
 
@@ -199,15 +200,16 @@ fn inner_sftp_upload_file(
     remote_path: &str,
 ) -> Result<()> {
     let handle = get_sftp_handle(state, connection_id)?;
-    let buffer =
-        fs::read(local_path).with_context(|| format!("read local file failed: {local_path}"))?;
+    let local_file =
+        File::open(local_path).with_context(|| format!("open local file failed: {local_path}"))?;
+    let mut reader = BufReader::new(local_file);
     let sftp = handle.sftp.lock();
     let mut remote_file = sftp
         .create(Path::new(remote_path))
         .with_context(|| format!("create remote file failed: {remote_path}"))?;
-    remote_file
-        .write_all(&buffer)
-        .with_context(|| format!("write remote file failed: {remote_path}"))?;
+    io::copy(&mut reader, &mut remote_file).with_context(|| {
+        format!("copy local file to remote failed: {local_path} -> {remote_path}")
+    })?;
     Ok(())
 }
 

@@ -640,7 +640,11 @@ function joinRemotePath(basePath: string, name: string) {
 
 function normalizeRemoteName(value: string | null) {
   const name = value?.trim() || '';
-  if (!name || name.includes('/') || name.includes('\\')) return '';
+
+  if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) {
+    return '';
+  }
+
   return name;
 }
 
