@@ -71,7 +71,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, shallowRef, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 
 import { type WorkspaceCredential, type WorkspaceHost, useWorkspaceStore } from '@/stores/workspace';
@@ -83,17 +83,19 @@ interface RemoteFileItem {
   size: number;
 }
 
+interface SftpSessionState {
+  hostId: string;
+  connectionId: string;
+  currentPath: string;
+  files: RemoteFileItem[];
+  loading: boolean;
+  connecting: boolean;
+  errorMessage: string;
+}
+
 const workspaceStore = useWorkspaceStore();
 
-const activeSftpHostId = ref('');
-const connectionId = ref('');
-const currentPath = ref('/');
-const files = ref<RemoteFileItem[]>([]);
-const autoConnecting = ref(false);
-const loading = ref(false);
-const errorMessage = ref('');
-
-let syncVersion = 0;
+const sessionsByHostId = shallowRef<Record<string, SftpSessionState>>({});
 
 const activeHost = computed(() => workspaceStore.activeHost);
 const cachedCredential = computed(() =>
@@ -102,6 +104,16 @@ const cachedCredential = computed(() =>
 const canAutoConnect = computed(() =>
   Boolean(activeHost.value && cachedCredential.value?.password),
 );
+const currentSession = computed(() => {
+  const hostId = activeHost.value?.id;
+  return hostId ? sessionsByHostId.value[hostId] : undefined;
+});
+const connectionId = computed(() => currentSession.value?.connectionId || '');
+const currentPath = computed(() => currentSession.value?.currentPath || '/');
+const files = computed(() => currentSession.value?.files || []);
+const loading = computed(() => Boolean(currentSession.value?.loading));
+const autoConnecting = computed(() => Boolean(currentSession.value?.connecting));
+const errorMessage = computed(() => currentSession.value?.errorMessage || '');
 const canBrowse = computed(() => Boolean(connectionId.value && !autoConnecting.value));
 const activeHostLabel = computed(() => {
   const host = activeHost.value;
@@ -119,6 +131,7 @@ const statusNotice = computed(() => {
   if (errorMessage.value) return errorMessage.value;
   if (!canAutoConnect.value) return '当前主机未缓存认证，请重新连接 SSH。';
   if (autoConnecting.value) return '正在连接 SFTP...';
+  if (loading.value) return '目录加载中...';
   if (connectionId.value) return `SFTP 已连接：${activeHostLabel.value}`;
   return '正在连接 SFTP...';
 });
@@ -126,57 +139,52 @@ const statusNotice = computed(() => {
 watch(
   () => ({
     hostId: workspaceStore.activeHost?.id || '',
-    credentialCreatedAt: workspaceStore.activeHost
-      ? workspaceStore.getCredential(workspaceStore.activeHost.id)?.createdAt || 0
-      : 0,
+    credentialVersion: workspaceStore.credentialVersion,
   }),
   () => {
     void syncSftpWithWorkspaceHost();
+    void cleanupSessionsWithoutCredential();
   },
   { immediate: true },
 );
 
 onBeforeUnmount(() => {
-  syncVersion += 1;
-  void closeSftp({ silent: true });
+  void closeAllSessions();
 });
 
 async function syncSftpWithWorkspaceHost() {
-  const syncId = ++syncVersion;
   const host = workspaceStore.activeHost;
 
   if (!host) {
-    await closeSftp({ silent: true });
-    resetBrowser();
-    errorMessage.value = '';
     return;
   }
 
   const credential = workspaceStore.getCredential(host.id);
 
   if (!credential?.password) {
-    await closeSftp({ silent: true });
-    resetBrowser();
-    errorMessage.value = '';
+    await closeSftpSession(host.id, { silent: true });
+    removeSession(host.id);
     return;
   }
 
-  if (connectionId.value && activeSftpHostId.value === host.id) {
+  const existing = sessionsByHostId.value[host.id];
+  if (existing?.connectionId || existing?.connecting) {
     return;
   }
 
-  await closeSftp({ silent: true });
-  if (syncId !== syncVersion) return;
-  await connectSftpWithCredential(host, credential, syncId);
+  await connectSftpWithCredential(host, credential);
 }
 
 async function connectSftpWithCredential(
   host: WorkspaceHost,
   credential: WorkspaceCredential,
-  syncId: number,
 ) {
-  autoConnecting.value = true;
-  errorMessage.value = '';
+  const initialPath = sessionsByHostId.value[host.id]?.currentPath || '/';
+  upsertSession(host.id, {
+    connecting: true,
+    loading: false,
+    errorMessage: '',
+  });
 
   try {
     const id = await invoke<string>('sftp_connect', {
@@ -190,33 +198,47 @@ async function connectSftpWithCredential(
       },
     });
 
-    if (syncId !== syncVersion) {
+    if (!workspaceStore.hasCredential(host.id)) {
       await invoke('sftp_close', { connectionId: id });
       return;
     }
 
-    connectionId.value = id;
-    activeSftpHostId.value = host.id;
-    currentPath.value = '/';
-    await loadDir('/', id);
+    upsertSession(host.id, {
+      connectionId: id,
+      currentPath: initialPath,
+      connecting: false,
+      errorMessage: '',
+    });
+    await loadDir(initialPath, host.id);
   } catch {
-    if (syncId !== syncVersion) return;
-    connectionId.value = '';
-    activeSftpHostId.value = '';
-    files.value = [];
-    errorMessage.value = 'SFTP 自动连接失败，请检查当前 SSH 认证或服务器 SFTP 权限。';
+    if (!workspaceStore.hasCredential(host.id)) {
+      removeSession(host.id);
+      return;
+    }
+
+    upsertSession(host.id, {
+      connectionId: '',
+      connecting: false,
+      loading: false,
+      files: [],
+      errorMessage: 'SFTP 自动连接失败，请检查当前 SSH 认证或服务器 SFTP 权限。',
+    });
   } finally {
-    if (syncId === syncVersion) {
-      autoConnecting.value = false;
+    const latest = sessionsByHostId.value[host.id];
+    if (latest?.connecting) {
+      upsertSession(host.id, { connecting: false });
     }
   }
 }
 
-async function loadDir(path: string, expectedConnectionId = connectionId.value) {
+async function loadDir(path: string, hostId = activeHost.value?.id) {
+  if (!hostId) return;
+
+  const session = sessionsByHostId.value[hostId];
+  const expectedConnectionId = session?.connectionId;
   if (!expectedConnectionId) return;
 
-  loading.value = true;
-  errorMessage.value = '';
+  upsertSession(hostId, { loading: true, errorMessage: '' });
 
   try {
     const items = await invoke<RemoteFileItem[]>('sftp_list_dir', {
@@ -224,31 +246,79 @@ async function loadDir(path: string, expectedConnectionId = connectionId.value) 
       path,
     });
 
-    if (connectionId.value !== expectedConnectionId) return;
+    const latest = sessionsByHostId.value[hostId];
+    if (!latest || latest.connectionId !== expectedConnectionId) return;
 
-    files.value = items;
-    currentPath.value = path;
+    upsertSession(hostId, {
+      files: items,
+      currentPath: path,
+      loading: false,
+      errorMessage: '',
+    });
   } catch {
-    if (connectionId.value !== expectedConnectionId) return;
+    const latest = sessionsByHostId.value[hostId];
+    if (!latest || latest.connectionId !== expectedConnectionId) return;
 
-    files.value = [];
-    errorMessage.value = '目录加载失败，请检查连接状态或目录权限。';
+    upsertSession(hostId, {
+      files: [],
+      loading: false,
+      errorMessage: '目录加载失败，请检查连接状态或目录权限。',
+    });
   } finally {
-    if (connectionId.value === expectedConnectionId) {
-      loading.value = false;
+    const latest = sessionsByHostId.value[hostId];
+    if (latest?.connectionId === expectedConnectionId && latest.loading) {
+      upsertSession(hostId, { loading: false });
     }
   }
 }
 
-async function closeSftp(options: { silent?: boolean } = {}) {
-  const id = connectionId.value;
-  connectionId.value = '';
-  activeSftpHostId.value = '';
-  files.value = [];
-  currentPath.value = '/';
+function getCurrentSession() {
+  const hostId = activeHost.value?.id;
+  return hostId ? sessionsByHostId.value[hostId] : undefined;
+}
 
-  if (!options.silent) {
-    errorMessage.value = '';
+function upsertSession(hostId: string, patch: Partial<SftpSessionState>) {
+  const current = sessionsByHostId.value[hostId];
+  const fallback: SftpSessionState = {
+    hostId,
+    connectionId: '',
+    currentPath: '/',
+    files: [],
+    loading: false,
+    connecting: false,
+    errorMessage: '',
+  };
+
+  sessionsByHostId.value = {
+    ...sessionsByHostId.value,
+    [hostId]: {
+      ...fallback,
+      ...current,
+      ...patch,
+    },
+  };
+}
+
+function removeSession(hostId: string) {
+  if (!sessionsByHostId.value[hostId]) return;
+
+  const next = { ...sessionsByHostId.value };
+  delete next[hostId];
+  sessionsByHostId.value = next;
+}
+
+async function closeSftpSession(hostId: string, options: { silent?: boolean } = {}) {
+  const session = sessionsByHostId.value[hostId];
+  const id = session?.connectionId;
+
+  if (session) {
+    upsertSession(hostId, {
+      connectionId: '',
+      files: [],
+      loading: false,
+      connecting: false,
+      errorMessage: options.silent ? session.errorMessage : '',
+    });
   }
 
   if (!id) return;
@@ -257,37 +327,54 @@ async function closeSftp(options: { silent?: boolean } = {}) {
     await invoke('sftp_close', { connectionId: id });
   } catch {
     if (!options.silent) {
-      errorMessage.value = 'SFTP 关闭失败。';
+      upsertSession(hostId, { errorMessage: 'SFTP 关闭失败。' });
     }
   }
 }
 
-function resetBrowser() {
-  connectionId.value = '';
-  activeSftpHostId.value = '';
-  files.value = [];
-  currentPath.value = '/';
-  autoConnecting.value = false;
-  loading.value = false;
+async function cleanupSessionsWithoutCredential() {
+  const hostIds = Object.keys(sessionsByHostId.value);
+
+  for (const hostId of hostIds) {
+    if (!workspaceStore.hasCredential(hostId)) {
+      await closeSftpSession(hostId, { silent: true });
+      removeSession(hostId);
+    }
+  }
+}
+
+async function closeAllSessions() {
+  const hostIds = Object.keys(sessionsByHostId.value);
+
+  await Promise.all(hostIds.map((hostId) => closeSftpSession(hostId, { silent: true })));
+  sessionsByHostId.value = {};
 }
 
 function openItem(file: RemoteFileItem) {
-  if (!file.isDir || loading.value) return;
-  void loadDir(file.path);
+  const hostId = activeHost.value?.id;
+  if (!hostId || !file.isDir || getCurrentSession()?.loading) return;
+  void loadDir(file.path, hostId);
 }
 
 function goParent() {
-  if (currentPath.value === '/') return;
-  void loadDir(getParentPath(currentPath.value));
+  const hostId = activeHost.value?.id;
+  const path = currentPath.value;
+  if (!hostId || path === '/') return;
+  void loadDir(getParentPath(path), hostId);
 }
 
 function refresh() {
-  if (!connectionId.value) {
+  const host = activeHost.value;
+  if (!host) return;
+
+  const session = sessionsByHostId.value[host.id];
+
+  if (!session?.connectionId) {
     void syncSftpWithWorkspaceHost();
     return;
   }
 
-  void loadDir(currentPath.value);
+  void loadDir(session.currentPath || '/', host.id);
 }
 
 function getParentPath(path: string) {

@@ -20,6 +20,7 @@ export interface WorkspaceCredential {
 export const useWorkspaceStore = defineStore('workspace', () => {
   const activeHost = ref<WorkspaceHost | null>(null);
   const credentialsByHostId = shallowRef<Record<string, WorkspaceCredential>>({});
+  const credentialVersion = ref(0);
 
   const activeHostLabel = computed(() => activeHost.value?.host || '未连接');
   const hasActiveHost = computed(() => Boolean(activeHost.value));
@@ -42,6 +43,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       ...credentialsByHostId.value,
       [credential.hostId]: { ...credential },
     };
+    credentialVersion.value += 1;
   }
 
   function getCredential(hostId: string) {
@@ -58,14 +60,18 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const next = { ...credentialsByHostId.value };
     delete next[hostId];
     credentialsByHostId.value = next;
+    credentialVersion.value += 1;
   }
 
   function clearAllCredentials() {
+    if (Object.keys(credentialsByHostId.value).length === 0) return;
     credentialsByHostId.value = {};
+    credentialVersion.value += 1;
   }
 
   return {
     activeHost,
+    credentialVersion,
     activeHostLabel,
     activeHostHasCredential,
     hasActiveHost,
