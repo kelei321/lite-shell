@@ -97,7 +97,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { ask, open, save } from '@tauri-apps/plugin-dialog';
 
 import { type WorkspaceCredential, type WorkspaceHost, useWorkspaceStore } from '@/stores/workspace';
 
@@ -555,7 +555,12 @@ async function deleteItem() {
   if (!snapshot) return;
 
   const typeText = item.isDir ? '空目录' : '文件';
-  if (!window.confirm(`确认删除${typeText} ${item.name}？`)) return;
+  const confirmed = await ask(`确认删除${typeText}「${item.name}」？\n\n此操作不可恢复。`, {
+    title: '确认删除',
+    kind: 'warning',
+  });
+
+  if (!confirmed) return;
 
   await runSftpAction({
     snapshot,
