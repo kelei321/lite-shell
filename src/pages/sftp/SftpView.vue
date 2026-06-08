@@ -198,7 +198,7 @@ async function connectSftpWithCredential(
     connectionId.value = id;
     activeSftpHostId.value = host.id;
     currentPath.value = '/';
-    await loadDir('/');
+    await loadDir('/', id);
   } catch {
     if (syncId !== syncVersion) return;
     connectionId.value = '';
@@ -212,25 +212,31 @@ async function connectSftpWithCredential(
   }
 }
 
-async function loadDir(path: string) {
-  if (!connectionId.value) return;
+async function loadDir(path: string, expectedConnectionId = connectionId.value) {
+  if (!expectedConnectionId) return;
 
   loading.value = true;
   errorMessage.value = '';
 
   try {
     const items = await invoke<RemoteFileItem[]>('sftp_list_dir', {
-      connectionId: connectionId.value,
+      connectionId: expectedConnectionId,
       path,
     });
+
+    if (connectionId.value !== expectedConnectionId) return;
 
     files.value = items;
     currentPath.value = path;
   } catch {
+    if (connectionId.value !== expectedConnectionId) return;
+
     files.value = [];
     errorMessage.value = '目录加载失败，请检查连接状态或目录权限。';
   } finally {
-    loading.value = false;
+    if (connectionId.value === expectedConnectionId) {
+      loading.value = false;
+    }
   }
 }
 
