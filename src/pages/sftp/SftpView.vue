@@ -231,6 +231,7 @@ async function loadDir(path: string) {
     files.value = items;
     currentPath.value = path;
   } catch (error) {
+    files.value = [];
     errorMessage.value = `目录加载失败：${String(error)}`;
   } finally {
     loading.value = false;
@@ -242,6 +243,10 @@ async function closeSftp(options: { silent?: boolean } = {}) {
   connectionId.value = '';
   files.value = [];
   currentPath.value = '/';
+
+  if (!options.silent) {
+    errorMessage.value = '';
+  }
 
   if (!id) return;
 
