@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod monitor;
 mod sftp;
 mod ssh;
 
@@ -25,6 +26,7 @@ fn main() {
             sftp::sftp_mkdir,
             sftp::sftp_delete,
             sftp::sftp_rename,
+            monitor::monitor_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run LiteShell");
