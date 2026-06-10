@@ -27,7 +27,11 @@
       </div>
     </header>
 
-    <section class="workspace-body" :style="{ gridTemplateColumns: workspaceBodyColumns }">
+    <section
+      class="workspace-body"
+      :class="{ 'workspace-body--monitor-collapsed': isMonitorCollapsed }"
+      :style="{ gridTemplateColumns: workspaceBodyColumns }"
+    >
       <nav class="icon-rail" aria-label="workspace navigation">
         <button class="rail-item rail-item--active" title="终端" type="button">⌁</button>
         <button class="rail-item" title="文件" type="button">□</button>
@@ -38,22 +42,19 @@
         <button class="rail-item" title="主题" type="button">◐</button>
       </nav>
 
-      <aside ref="monitorPanelRef" class="monitor-panel" :class="{ 'monitor-panel--collapsed': isMonitorCollapsed }">
-        <button
-          class="monitor-toggle"
-          :title="isMonitorCollapsed ? '展开监控面板' : '折叠监控面板'"
-          type="button"
-          @click="toggleMonitorPanel"
-        >
-          {{ isMonitorCollapsed ? '›' : '‹' }}
+      <aside v-if="!isMonitorCollapsed" ref="monitorPanelRef" class="monitor-panel">
+        <button class="monitor-toggle" title="折叠监控面板" type="button" @click="toggleMonitorPanel">
+          ‹
         </button>
-        <div v-show="!isMonitorCollapsed" class="monitor-panel__content">
-          <MonitorPanel />
-        </div>
+        <MonitorPanel />
       </aside>
 
+      <button v-else class="monitor-expand-button" title="展开监控面板" type="button" @click="toggleMonitorPanel">
+        ›
+      </button>
+
       <div
-        v-show="!isMonitorCollapsed"
+        v-if="!isMonitorCollapsed"
         class="workspace-vertical-splitter"
         role="separator"
         aria-label="调整监控面板宽度"
@@ -111,7 +112,7 @@ type WorkspaceLayoutPreference = {
 
 const LAYOUT_STORAGE_KEY = 'lite-shell.workspace.layout';
 const DEFAULT_MONITOR_WIDTH = 292;
-const COLLAPSED_MONITOR_WIDTH = 42;
+const COLLAPSED_EXPAND_WIDTH = 28;
 const MIN_MONITOR_WIDTH = 220;
 const MAX_MONITOR_WIDTH = 420;
 const DEFAULT_TERMINAL_RATIO = 0.52;
@@ -142,12 +143,11 @@ const workspaceMainRows = computed(() => {
   return `minmax(180px, ${topRatio}fr) 10px minmax(160px, ${bottomRatio}fr)`;
 });
 const workspaceBodyColumns = computed(() => {
-  const monitorColumn = isMonitorCollapsed.value
-    ? `${COLLAPSED_MONITOR_WIDTH}px`
-    : `${monitorWidth.value}px`;
-  const splitterColumn = isMonitorCollapsed.value ? '0px' : '8px';
+  if (isMonitorCollapsed.value) {
+    return `52px ${COLLAPSED_EXPAND_WIDTH}px minmax(0, 1fr)`;
+  }
 
-  return `52px ${monitorColumn} ${splitterColumn} minmax(0, 1fr)`;
+  return `52px ${monitorWidth.value}px 8px minmax(0, 1fr)`;
 });
 
 onMounted(() => {
@@ -165,6 +165,8 @@ function toggleMonitorPanel() {
 }
 
 function startPanelResize(event: PointerEvent) {
+  if (resizingPanel.value) return;
+
   event.preventDefault();
   resizingPanel.value = true;
   document.body.classList.add('is-resizing-row');
@@ -194,7 +196,7 @@ function stopPanelResize() {
 }
 
 function startMonitorResize(event: PointerEvent) {
-  if (isMonitorCollapsed.value) return;
+  if (isMonitorCollapsed.value || resizingMonitor.value) return;
 
   event.preventDefault();
   resizingMonitor.value = true;
@@ -327,27 +329,14 @@ function clamp(value: number, min: number, max: number) {
 
 .monitor-panel {
   min-width: 0;
-  transition: padding 0.16s ease;
 }
 
-.monitor-panel--collapsed {
-  align-items: center;
-  overflow: hidden;
-  padding: 6px 4px;
-}
-
-.monitor-panel__content {
-  min-width: 0;
-  min-height: 0;
-}
-
-.monitor-toggle {
+.monitor-toggle,
+.monitor-expand-button {
   display: grid;
   width: 24px;
   height: 24px;
-  flex: 0 0 auto;
   place-items: center;
-  align-self: flex-end;
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 7px;
   background: rgba(2, 6, 23, 0.74);
@@ -355,14 +344,22 @@ function clamp(value: number, min: number, max: number) {
   cursor: pointer;
 }
 
-.monitor-toggle:hover {
-  border-color: rgba(96, 165, 250, 0.5);
-  color: #dbeafe;
+.monitor-toggle {
+  flex: 0 0 auto;
+  align-self: flex-end;
+  margin-bottom: 6px;
 }
 
-.monitor-panel--collapsed .monitor-toggle {
-  align-self: center;
-  margin-top: 2px;
+.monitor-expand-button {
+  align-self: start;
+  justify-self: center;
+  margin-top: 4px;
+}
+
+.monitor-toggle:hover,
+.monitor-expand-button:hover {
+  border-color: rgba(96, 165, 250, 0.5);
+  color: #dbeafe;
 }
 
 .workspace-vertical-splitter {
