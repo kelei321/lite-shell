@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 const TRANSFER_PROGRESS_EVENT: &str = "sftp-transfer-progress";
 const TRANSFER_BUFFER_SIZE: usize = 64 * 1024;
+const TRANSFER_PROGRESS_STEP_BYTES: u64 = 512 * 1024;
 
 #[derive(Default)]
 pub struct SftpState {
@@ -280,6 +281,7 @@ fn copy_with_progress<R: Read, W: Write>(
 ) -> Result<()> {
     let mut buffer = [0_u8; TRANSFER_BUFFER_SIZE];
     let mut transferred_bytes = 0_u64;
+    let mut last_emitted_bytes = 0_u64;
 
     loop {
         let read_size = reader.read(&mut buffer)?;
@@ -289,7 +291,13 @@ fn copy_with_progress<R: Read, W: Write>(
 
         writer.write_all(&buffer[..read_size])?;
         transferred_bytes = transferred_bytes.saturating_add(read_size as u64);
-        emit_transfer_progress(app, transfer_id, transferred_bytes, total_bytes, "running");
+
+        if transferred_bytes.saturating_sub(last_emitted_bytes) >= TRANSFER_PROGRESS_STEP_BYTES
+            || (total_bytes > 0 && transferred_bytes >= total_bytes)
+        {
+            emit_transfer_progress(app, transfer_id, transferred_bytes, total_bytes, "running");
+            last_emitted_bytes = transferred_bytes;
+        }
     }
 
     writer.flush()?;
