@@ -16,37 +16,33 @@
           {{ statusNotice }}
         </div>
 
-        <div class="action-bar">
-          <button class="action-button" :disabled="!canRunConnectedAction" type="button" @click="uploadFile">
-            上传
-          </button>
-          <button class="action-button" :disabled="!canDownload" type="button" @click="downloadFile">
-            下载
-          </button>
-          <button class="action-button" :disabled="!canRunConnectedAction" type="button" @click="createDirectory">
-            新建目录
-          </button>
-          <button class="action-button" :disabled="!canRunSelectedAction" type="button" @click="renameItem">
-            重命名
-          </button>
-          <button class="action-button action-button--danger" :disabled="!canRunSelectedAction" type="button" @click="deleteItem">
-            删除
-          </button>
-          <button class="action-button" :disabled="autoConnecting || loading || actionLoading" type="button" @click="refresh">
-            刷新
-          </button>
+        <div class="sftp-toolbar-row">
+          <div class="sftp-path-main" :title="currentPath">{{ currentPath }}</div>
+          <div class="sftp-icon-actions" aria-label="SFTP 操作">
+            <button class="sftp-icon-button" :disabled="!canBrowse || currentPath === '/'" title="上级" type="button" aria-label="上级" @click="goParent">
+              ↰
+            </button>
+            <button class="sftp-icon-button" :disabled="!canRunConnectedAction" title="上传" type="button" aria-label="上传" @click="uploadFile">
+              ⬆
+            </button>
+            <button class="sftp-icon-button" :disabled="!canDownload" title="下载" type="button" aria-label="下载" @click="downloadFile">
+              ⬇
+            </button>
+            <button class="sftp-icon-button" :disabled="!canRunConnectedAction" title="新建目录" type="button" aria-label="新建目录" @click="createDirectory">
+              📁+
+            </button>
+            <button class="sftp-icon-button" :disabled="!canRunSelectedAction" title="重命名" type="button" aria-label="重命名" @click="renameItem">
+              ✎
+            </button>
+            <button class="sftp-icon-button sftp-icon-button--danger" :disabled="!canRunSelectedAction" title="删除" type="button" aria-label="删除" @click="deleteItem">
+              🗑
+            </button>
+            <button class="sftp-icon-button" :disabled="autoConnecting || loading || actionLoading" title="刷新" type="button" aria-label="刷新" @click="refresh">
+              ↻
+            </button>
+          </div>
           <span v-if="actionLoading" class="action-message">{{ actionStatusText }}</span>
           <span v-else-if="actionMessage" class="action-message">{{ actionMessage }}</span>
-        </div>
-
-        <div class="path-bar">
-          <button class="ghost-button" :disabled="!canBrowse || currentPath === '/'" type="button" @click="goParent">
-            上级
-          </button>
-          <div class="path-text">{{ currentPath }}</div>
-          <button class="ghost-button" :disabled="autoConnecting || loading" type="button" @click="refresh">
-            刷新
-          </button>
         </div>
 
         <div v-if="errorMessage" class="error-box">{{ errorMessage }}</div>
@@ -898,6 +894,69 @@ function formatSize(size: number) {
   color: #bbf7d0;
 }
 
+.sftp-toolbar-row {
+  display: grid;
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, auto);
+  gap: 8px;
+  border-bottom: 1px solid var(--ls-border);
+  background: linear-gradient(180deg, var(--ls-panel-strong), var(--ls-panel-soft));
+  padding: 6px 8px;
+}
+
+.sftp-path-main {
+  min-width: 0;
+  height: 28px;
+  overflow: hidden;
+  border: 1px solid var(--ls-border);
+  border-radius: 8px;
+  background: var(--ls-panel);
+  color: var(--ls-text);
+  box-shadow: inset 0 1px 2px rgba(16, 24, 40, 0.08);
+  font-size: 12px;
+  line-height: 26px;
+  padding: 0 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sftp-icon-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.sftp-icon-button {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--ls-border-strong);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-strong));
+  color: var(--ls-text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 1px 1px rgba(16, 24, 40, 0.06);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.sftp-icon-button:hover:not(:disabled) {
+  border-color: var(--ls-primary);
+  color: var(--ls-primary);
+}
+
+.sftp-icon-button--danger:hover:not(:disabled) {
+  border-color: var(--ls-danger);
+  color: var(--ls-danger);
+}
+
+.sftp-icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .action-bar {
   display: flex;
   min-height: 48px;
@@ -935,8 +994,9 @@ function formatSize(size: number) {
 
 .action-message {
   min-width: 0;
+  max-width: 180px;
   overflow: hidden;
-  color: #93c5fd;
+  color: var(--ls-text-muted);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
