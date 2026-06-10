@@ -22,7 +22,7 @@
         </div>
       </section>
 
-      <section class="compact-section compact-section--plain">
+      <section class="compact-section compact-section--plain compact-section--metrics">
         <div class="metric-line metric-line--text">
           <span>运行</span>
           <strong>{{ valueOrDash(snapshot?.uptime) }}</strong>
@@ -54,7 +54,7 @@
         </div>
       </section>
 
-      <section class="compact-section">
+      <section class="compact-section compact-section--scroll compact-section--network">
         <div class="section-title">
           <span>网络</span>
           <strong>{{ refreshLabel }}</strong>
@@ -69,7 +69,7 @@
         <p v-else class="compact-muted">-</p>
       </section>
 
-      <section class="compact-section compact-section--table">
+      <section class="compact-section compact-section--scroll compact-section--table">
         <div class="disk-table">
           <div class="disk-table__head">
             <span>路径</span>
@@ -266,16 +266,19 @@ function formatRate(bytesPerSecond: number) {
 
 <style scoped>
 .monitor-stack {
-  display: flex;
+  display: grid;
+  height: 100%;
   min-height: 0;
-  flex-direction: column;
-  gap: 8px;
+  grid-template-rows: auto auto minmax(80px, 0.95fr) minmax(118px, 1.35fr);
+  gap: 6px;
+  overflow: hidden;
   color: var(--ls-text);
   font-size: 12px;
 }
 
 .compact-section,
 .monitor-empty {
+  min-height: 0;
   border: 1px solid var(--ls-border);
   border-radius: 8px;
   background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-soft));
@@ -288,10 +291,16 @@ function formatRate(bytesPerSecond: number) {
 
 .compact-section--plain {
   display: grid;
-  gap: 4px;
+  gap: 2px;
   border-color: var(--ls-border);
   background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-soft));
-  padding: 8px;
+  padding: 6px;
+}
+
+.compact-section--scroll {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
 }
 
 .monitor-empty {
@@ -312,17 +321,13 @@ function formatRate(bytesPerSecond: number) {
   display: grid;
   min-width: 0;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
 .host-line,
 .metric-line--text {
-  grid-template-columns: 38px minmax(0, 1fr);
-}
-
-.host-line,
-.metric-line--text {
-  min-height: 22px;
+  grid-template-columns: 30px minmax(0, 1fr);
+  min-height: 18px;
 }
 
 .host-line span,
@@ -339,20 +344,20 @@ function formatRate(bytesPerSecond: number) {
   min-width: 0;
   overflow: hidden;
   color: var(--ls-text);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .metric-line {
-  grid-template-columns: 38px minmax(0, 1fr) 82px;
-  min-height: 22px;
+  grid-template-columns: 30px minmax(0, 1fr) 66px;
+  min-height: 18px;
 }
 
 .thin-progress,
 .disk-progress {
-  height: 12px;
+  height: 9px;
   overflow: hidden;
   border: 1px solid var(--ls-border);
   border-radius: 999px;
@@ -381,11 +386,12 @@ function formatRate(bytesPerSecond: number) {
 
 .section-title {
   grid-template-columns: minmax(0, 1fr) auto;
-  height: 26px;
+  height: 22px;
+  flex: 0 0 auto;
   border-bottom: 1px solid var(--ls-border);
   background: linear-gradient(180deg, var(--ls-panel-strong), var(--ls-panel-soft));
   color: var(--ls-text);
-  padding: 0 8px;
+  padding: 0 6px;
 }
 
 .section-title span,
@@ -395,13 +401,16 @@ function formatRate(bytesPerSecond: number) {
 
 .network-table {
   display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
 }
 
 .network-row {
-  grid-template-columns: minmax(0, 1fr) 62px 62px;
-  min-height: 26px;
+  grid-template-columns: minmax(0, 1fr) 58px 58px;
+  min-height: 20px;
   border-bottom: 1px solid color-mix(in srgb, var(--ls-border) 72%, transparent);
-  padding: 0 8px;
+  padding: 0 6px;
 }
 
 .network-row:last-child {
@@ -419,28 +428,35 @@ function formatRate(bytesPerSecond: number) {
 }
 
 .disk-table {
-  display: grid;
+  display: flex;
   min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
 }
 
 .disk-table__head {
-  grid-template-columns: minmax(0, 1fr) 88px;
-  height: 26px;
+  grid-template-columns: minmax(0, 1fr) 82px;
+  height: 22px;
+  flex: 0 0 auto;
   border-bottom: 1px solid var(--ls-border);
   background: linear-gradient(180deg, var(--ls-panel-strong), var(--ls-panel-soft));
   color: var(--ls-text);
-  padding: 0 8px;
+  padding: 0 6px;
 }
 
 .disk-table__body {
   display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
 }
 
 .disk-row {
-  grid-template-columns: minmax(0, 1fr) 88px;
-  min-height: 26px;
+  grid-template-columns: minmax(0, 1fr) 82px;
+  min-height: 20px;
   border-bottom: 1px solid color-mix(in srgb, var(--ls-border) 64%, transparent);
-  padding: 3px 8px 4px;
+  padding: 2px 6px 3px;
 }
 
 .disk-row:nth-child(even) {
@@ -453,7 +469,7 @@ function formatRate(bytesPerSecond: number) {
 
 .disk-progress {
   grid-column: 1 / -1;
-  height: 4px;
+  height: 3px;
   border: 0;
   background: var(--ls-panel-strong);
 }
