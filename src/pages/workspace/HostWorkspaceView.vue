@@ -287,25 +287,14 @@ function clamp(value: number, min: number, max: number) {
 
 .workspace-terminal :deep(.content-grid) {
   height: 100%;
-  grid-template-columns: 260px minmax(0, 1fr);
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
   padding: 8px;
-}
-
-.workspace-terminal :deep(.connect-card),
-.workspace-terminal :deep(.host-list-card),
-.workspace-terminal :deep(.quick-card) {
-  border-color: rgba(148, 163, 184, 0.12);
-  border-radius: 10px;
-  background: rgba(2, 6, 23, 0.54);
-  padding: 10px;
 }
 
 .workspace-terminal :deep(.workspace-card),
 .workspace-sftp :deep(.browser-card) {
-  border-color: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.16);
   border-radius: 10px;
-  background: rgba(2, 6, 23, 0.68);
 }
 
 .workspace-terminal :deep(.terminal-card) {
@@ -315,6 +304,14 @@ function clamp(value: number, min: number, max: number) {
 .workspace-terminal :deep(.tabs-bar) {
   min-height: 36px;
   padding: 5px 8px;
+}
+
+.workspace-terminal :deep(.quick-connect-page) {
+  min-height: 0;
+}
+
+.workspace-terminal :deep(.connection-manager-dialog) {
+  max-height: calc(100vh - 80px);
 }
 
 .workspace-sftp :deep(.content-grid) {
@@ -402,11 +399,5 @@ function clamp(value: number, min: number, max: number) {
 :global(body.is-resizing-column *) {
   cursor: col-resize !important;
   user-select: none;
-}
-
-@media (max-width: 1260px) {
-  .workspace-terminal :deep(.content-grid) {
-    grid-template-columns: 220px minmax(0, 1fr);
-  }
 }
 </style>
