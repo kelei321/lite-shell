@@ -7,6 +7,8 @@ export interface HostProfile {
   host: string;
   port: number;
   username: string;
+  group: string;
+  lastConnectedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -17,9 +19,11 @@ export interface HostProfileInput {
   host: string;
   port: number;
   username: string;
+  group?: string;
 }
 
 const STORAGE_KEY = 'lite-shell:hosts:v1';
+const DEFAULT_GROUP = '默认分组';
 
 function createId() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -27,6 +31,10 @@ function createId() {
   }
 
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function normalizeGroup(group: string | undefined) {
+  return group?.trim() || DEFAULT_GROUP;
 }
 
 function normalizeHost(input: HostProfileInput, now = Date.now()): HostProfile {
@@ -38,6 +46,7 @@ function normalizeHost(input: HostProfileInput, now = Date.now()): HostProfile {
     host: input.host.trim(),
     port: Number(input.port) || 22,
     username: input.username.trim(),
+    group: normalizeGroup(input.group),
     createdAt: now,
     updatedAt: now,
   };
@@ -48,12 +57,22 @@ function loadHosts(): HostProfile[] {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
 
-    const parsed = JSON.parse(raw) as HostProfile[];
+    const parsed = JSON.parse(raw) as Partial<HostProfile>[];
     if (!Array.isArray(parsed)) return [];
 
-    return parsed.filter(
-      (item) => item.id && item.host && item.username && Number.isFinite(item.port),
-    );
+    return parsed
+      .filter((item) => item.id && item.host && item.username && Number.isFinite(item.port))
+      .map((item) => ({
+        id: String(item.id),
+        name: String(item.name || `${item.username}@${item.host}`),
+        host: String(item.host),
+        port: Number(item.port) || 22,
+        username: String(item.username),
+        group: normalizeGroup(item.group),
+        lastConnectedAt: Number.isFinite(item.lastConnectedAt) ? Number(item.lastConnectedAt) : undefined,
+        createdAt: Number.isFinite(item.createdAt) ? Number(item.createdAt) : Date.now(),
+        updatedAt: Number.isFinite(item.updatedAt) ? Number(item.updatedAt) : Date.now(),
+      }));
   } catch {
     return [];
   }
@@ -69,6 +88,22 @@ export const useHostStore = defineStore('hosts', () => {
   const sortedHosts = computed(() =>
     [...hosts.value].sort((left, right) => right.updatedAt - left.updatedAt),
   );
+  const recentHosts = computed(() =>
+    [...hosts.value]
+      .filter((host) => host.lastConnectedAt)
+      .sort((left, right) => (right.lastConnectedAt || 0) - (left.lastConnectedAt || 0))
+      .slice(0, 5),
+  );
+  const groups = computed(() => {
+    const names = hosts.value.map((host) => normalizeGroup(host.group));
+    return [DEFAULT_GROUP, ...names]
+      .filter((name, index, array) => array.indexOf(name) === index)
+      .sort((left, right) => {
+        if (left === DEFAULT_GROUP) return -1;
+        if (right === DEFAULT_GROUP) return 1;
+        return left.localeCompare(right, 'zh-CN');
+      });
+  });
 
   function upsertHost(input: HostProfileInput) {
     const now = Date.now();
@@ -81,6 +116,7 @@ export const useHostStore = defineStore('hosts', () => {
       hosts.value[currentIndex] = {
         ...normalizeHost(input, now),
         id: current.id,
+        lastConnectedAt: current.lastConnectedAt,
         createdAt: current.createdAt,
         updatedAt: now,
       };
@@ -101,13 +137,17 @@ export const useHostStore = defineStore('hosts', () => {
     const host = hosts.value.find((item) => item.id === id);
     if (!host) return;
 
-    host.updatedAt = Date.now();
+    const now = Date.now();
+    host.updatedAt = now;
+    host.lastConnectedAt = now;
     saveHosts(hosts.value);
   }
 
   return {
     hosts,
     sortedHosts,
+    recentHosts,
+    groups,
     upsertHost,
     removeHost,
     touchHost,
