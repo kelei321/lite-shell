@@ -269,16 +269,17 @@ function formatRate(bytesPerSecond: number) {
   display: flex;
   min-height: 0;
   flex-direction: column;
-  gap: 6px;
-  color: #dbeafe;
+  gap: 8px;
+  color: var(--ls-text);
   font-size: 12px;
 }
 
 .compact-section,
 .monitor-empty {
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 6px;
-  background: rgba(2, 6, 23, 0.34);
+  border: 1px solid var(--ls-border);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-soft));
+  box-shadow: var(--ls-shadow-sm);
 }
 
 .compact-section {
@@ -287,16 +288,17 @@ function formatRate(bytesPerSecond: number) {
 
 .compact-section--plain {
   display: grid;
-  gap: 2px;
-  border-color: transparent;
-  background: transparent;
+  gap: 4px;
+  border-color: var(--ls-border);
+  background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-soft));
+  padding: 8px;
 }
 
 .monitor-empty {
   display: grid;
   min-height: 118px;
   place-items: center;
-  color: #94a3b8;
+  color: var(--ls-text-muted);
   padding: 12px;
   text-align: center;
 }
@@ -315,12 +317,17 @@ function formatRate(bytesPerSecond: number) {
 
 .host-line,
 .metric-line--text {
-  grid-template-columns: 34px minmax(0, 1fr);
+  grid-template-columns: 38px minmax(0, 1fr);
+}
+
+.host-line,
+.metric-line--text {
+  min-height: 22px;
 }
 
 .host-line span,
 .metric-line span {
-  color: #cbd5e1;
+  color: var(--ls-text-muted);
   white-space: nowrap;
 }
 
@@ -331,56 +338,59 @@ function formatRate(bytesPerSecond: number) {
 .disk-row strong {
   min-width: 0;
   overflow: hidden;
-  color: #e5e7eb;
+  color: var(--ls-text);
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .metric-line {
-  grid-template-columns: 34px minmax(0, 1fr) 78px;
-  min-height: 18px;
+  grid-template-columns: 38px minmax(0, 1fr) 82px;
+  min-height: 22px;
 }
 
 .thin-progress,
 .disk-progress {
-  height: 13px;
+  height: 12px;
   overflow: hidden;
-  border: 1px solid rgba(148, 163, 184, 0.32);
-  background: rgba(15, 23, 42, 0.84);
+  border: 1px solid var(--ls-border);
+  border-radius: 999px;
+  background: var(--ls-panel-strong);
+  box-shadow: inset 0 1px 2px rgba(16, 24, 40, 0.1);
 }
 
 .thin-progress__bar,
 .disk-progress i {
   display: block;
   height: 100%;
+  border-radius: inherit;
 }
 
 .thin-progress__bar--cpu {
-  background: rgba(134, 239, 172, 0.72);
+  background: linear-gradient(90deg, var(--ls-success), #86efac);
 }
 
 .thin-progress__bar--memory {
-  background: rgba(251, 191, 36, 0.44);
+  background: linear-gradient(90deg, var(--ls-warning), #fde68a);
 }
 
 .thin-progress__bar--swap {
-  background: rgba(96, 165, 250, 0.44);
+  background: linear-gradient(90deg, var(--ls-primary), #93c5fd);
 }
 
 .section-title {
   grid-template-columns: minmax(0, 1fr) auto;
-  height: 22px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(30, 41, 59, 0.7);
-  color: #e5e7eb;
-  padding: 0 6px;
+  height: 26px;
+  border-bottom: 1px solid var(--ls-border);
+  background: linear-gradient(180deg, var(--ls-panel-strong), var(--ls-panel-soft));
+  color: var(--ls-text);
+  padding: 0 8px;
 }
 
 .section-title span,
 .disk-table__head span {
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .network-table {
@@ -388,10 +398,10 @@ function formatRate(bytesPerSecond: number) {
 }
 
 .network-row {
-  grid-template-columns: minmax(0, 1fr) 58px 58px;
-  min-height: 22px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
-  padding: 0 6px;
+  grid-template-columns: minmax(0, 1fr) 62px 62px;
+  min-height: 26px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ls-border) 72%, transparent);
+  padding: 0 8px;
 }
 
 .network-row:last-child {
@@ -399,12 +409,12 @@ function formatRate(bytesPerSecond: number) {
 }
 
 .rate-down {
-  color: #86efac;
+  color: var(--ls-success);
   text-align: right;
 }
 
 .rate-up {
-  color: #fca5a5;
+  color: var(--ls-primary);
   text-align: right;
 }
 
@@ -414,12 +424,12 @@ function formatRate(bytesPerSecond: number) {
 }
 
 .disk-table__head {
-  grid-template-columns: minmax(0, 1fr) 82px;
-  height: 24px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(30, 41, 59, 0.7);
-  color: #e5e7eb;
-  padding: 0 6px;
+  grid-template-columns: minmax(0, 1fr) 88px;
+  height: 26px;
+  border-bottom: 1px solid var(--ls-border);
+  background: linear-gradient(180deg, var(--ls-panel-strong), var(--ls-panel-soft));
+  color: var(--ls-text);
+  padding: 0 8px;
 }
 
 .disk-table__body {
@@ -427,14 +437,14 @@ function formatRate(bytesPerSecond: number) {
 }
 
 .disk-row {
-  grid-template-columns: minmax(0, 1fr) 82px;
-  min-height: 22px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.06);
-  padding: 2px 6px 3px;
+  grid-template-columns: minmax(0, 1fr) 88px;
+  min-height: 26px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ls-border) 64%, transparent);
+  padding: 3px 8px 4px;
 }
 
 .disk-row:nth-child(even) {
-  background: rgba(148, 163, 184, 0.04);
+  background: color-mix(in srgb, var(--ls-panel-strong) 44%, transparent);
 }
 
 .disk-row strong {
@@ -443,13 +453,13 @@ function formatRate(bytesPerSecond: number) {
 
 .disk-progress {
   grid-column: 1 / -1;
-  height: 3px;
+  height: 4px;
   border: 0;
-  background: rgba(30, 41, 59, 0.8);
+  background: var(--ls-panel-strong);
 }
 
 .disk-progress i {
-  background: linear-gradient(90deg, #22c55e, #f59e0b);
+  background: linear-gradient(90deg, var(--ls-success), var(--ls-warning));
 }
 
 .cell-ellipsis,
@@ -462,7 +472,7 @@ function formatRate(bytesPerSecond: number) {
 
 .compact-muted {
   margin: 0;
-  color: #94a3b8;
-  padding: 6px;
+  color: var(--ls-text-muted);
+  padding: 8px;
 }
 </style>
