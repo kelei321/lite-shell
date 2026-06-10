@@ -197,7 +197,7 @@ textarea:focus {
 .progress span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--ls-primary), #38bdf8); }
 .network-row { justify-content: space-between; margin-top: 10px; color: var(--ls-text); font-size: 12px; }
 .down { color: var(--ls-success); } .up { color: #60a5fa; }
-.disk-row { display: grid; align-items: center; grid-template-columns: 48px 1fr 48px; gap: 8px; margin-top: 8px; color: var(--ls-text); font-size: 11px; }
+.disk-row { display: grid; align-items: center; grid-template-columns: minmax(0, 1fr) 88px; gap: 8px; margin-top: 8px; color: var(--ls-text); font-size: 11px; }
 .disk-row em { display: block; height: 4px; border-radius: 999px; background: linear-gradient(90deg, var(--ls-success), var(--ls-warning)); }
 .workspace-main { display: grid; min-width: 0; min-height: 0; grid-template-rows: minmax(280px, 1fr) 10px minmax(260px, 0.94fr); }
 .panel { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; }
@@ -223,4 +223,166 @@ textarea:focus {
 .workspace-terminal .terminal-card { padding: 8px; }
 .workspace-terminal .tabs-bar { min-height: 36px; padding: 5px 8px; }
 .workspace-sftp .path-bar { padding: 8px; }
+
+/* Cross-view Bootstrap-like theme normalization. These selectors intentionally
+   outrank page-level scoped styles so all panels keep the same visual language. */
+.workspace-shell .workspace-sftp .sftp-layout,
+.workspace-shell .workspace-terminal .terminal-layout {
+  background: var(--ls-bg);
+  color: var(--ls-text);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .browser-card,
+.workspace-shell .workspace-sftp .sftp-layout .transfer-panel,
+.workspace-shell .workspace-sftp .sftp-layout .toolbar,
+.workspace-shell .workspace-sftp .sftp-layout .table-wrap {
+  border: 1px solid var(--ls-border);
+  background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-soft));
+  box-shadow: var(--ls-shadow-sm);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .browser-card {
+  border-radius: 10px;
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .status-strip,
+.workspace-shell .workspace-sftp .sftp-layout .action-bar,
+.workspace-shell .workspace-sftp .sftp-layout .path-bar,
+.workspace-shell .workspace-sftp .sftp-layout .transfer-panel__head {
+  border-color: var(--ls-border);
+  background: linear-gradient(180deg, var(--ls-panel-strong), var(--ls-panel-soft));
+  color: var(--ls-text-muted);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .status-strip--online {
+  color: var(--ls-success);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .status,
+.workspace-shell .workspace-sftp .sftp-layout .status--online {
+  border: 1px solid var(--ls-border);
+  background: var(--ls-panel-soft);
+  color: var(--ls-text-muted);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .status--online {
+  border-color: color-mix(in srgb, var(--ls-success) 42%, var(--ls-border));
+  background: color-mix(in srgb, var(--ls-success) 12%, var(--ls-panel));
+  color: var(--ls-success);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .action-button,
+.workspace-shell .workspace-sftp .sftp-layout .ghost-button,
+.workspace-shell .monitor-toggle,
+.workspace-shell .monitor-expand-button {
+  border: 1px solid var(--ls-border-strong);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-strong));
+  color: var(--ls-text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 1px 1px rgba(16, 24, 40, 0.06);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .action-button:hover:not(:disabled),
+.workspace-shell .workspace-sftp .sftp-layout .ghost-button:hover:not(:disabled),
+.workspace-shell .monitor-toggle:hover,
+.workspace-shell .monitor-expand-button:hover {
+  border-color: var(--ls-primary);
+  color: var(--ls-primary);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .action-button--danger {
+  color: var(--ls-danger);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .action-button:disabled,
+.workspace-shell .workspace-sftp .sftp-layout .ghost-button:disabled {
+  color: var(--ls-text-muted);
+  opacity: 0.55;
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .path-text {
+  border: 1px solid var(--ls-border);
+  border-radius: 8px;
+  background: var(--ls-panel);
+  color: var(--ls-text);
+  box-shadow: inset 0 1px 2px rgba(16, 24, 40, 0.08);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .error-box {
+  border-color: color-mix(in srgb, var(--ls-danger) 40%, var(--ls-border));
+  background: color-mix(in srgb, var(--ls-danger) 10%, var(--ls-panel));
+  color: var(--ls-danger);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .file-table {
+  color: var(--ls-text);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .file-table th {
+  border-color: var(--ls-border);
+  background: linear-gradient(180deg, var(--ls-panel-strong), var(--ls-panel-soft));
+  color: var(--ls-text-muted);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .file-table td {
+  border-color: color-mix(in srgb, var(--ls-border) 72%, transparent);
+  color: var(--ls-text);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .file-table tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--ls-panel-strong) 42%, transparent);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .file-table tbody tr:hover,
+.workspace-shell .workspace-sftp .sftp-layout .file-row--selected {
+  background: var(--ls-primary-soft);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .file-row--dir .name-cell,
+.workspace-shell .workspace-sftp .sftp-layout .file-icon {
+  color: var(--ls-primary);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .empty-cell,
+.workspace-shell .workspace-sftp .sftp-layout .action-message,
+.workspace-shell .workspace-sftp .sftp-layout .transfer-panel__head span,
+.workspace-shell .workspace-sftp .sftp-layout .transfer-task__foot,
+.workspace-shell .workspace-sftp .sftp-layout .transfer-task__meta span {
+  color: var(--ls-text-muted);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .transfer-list,
+.workspace-shell .workspace-sftp .sftp-layout .transfer-task {
+  border-color: var(--ls-border);
+  background: var(--ls-panel-soft);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .transfer-task__type {
+  border-color: var(--ls-border);
+  background: var(--ls-primary-soft);
+  color: var(--ls-primary);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .transfer-progress {
+  border: 1px solid var(--ls-border);
+  background: var(--ls-panel-strong);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .transfer-progress__bar--running {
+  background: linear-gradient(90deg, var(--ls-primary), #38bdf8);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .transfer-progress__bar--success {
+  background: linear-gradient(90deg, var(--ls-success), #86efac);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .transfer-progress__bar--failed {
+  background: linear-gradient(90deg, var(--ls-danger), #fca5a5);
+}
+
+.workspace-shell .monitor-panel {
+  border-color: var(--ls-border);
+  background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-soft));
+}
+
 @media (max-width: 1260px) { .workspace-body { grid-template-columns: 48px 240px minmax(0, 1fr); } }
