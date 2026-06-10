@@ -55,6 +55,36 @@ body { margin: 0; min-width: 960px; min-height: 100vh; overflow: hidden; backgro
 button, input, select, textarea { font: inherit; }
 button { border: 0; }
 
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--ls-border-strong) 72%, transparent) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ls-border-strong) 72%, transparent);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--ls-primary) 54%, var(--ls-border-strong));
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 .ls-card,
 .ls-modal,
 .system-card,
@@ -137,20 +167,13 @@ textarea:focus {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  grid-template-rows: 56px minmax(0, 1fr) 44px;
+  grid-template-rows: minmax(0, 1fr) 32px;
   background: radial-gradient(circle at 70% 10%, color-mix(in srgb, var(--ls-primary) 12%, transparent), transparent 34%), linear-gradient(135deg, var(--ls-app-bg), var(--ls-bg));
   color: var(--ls-text);
 }
 
 .titlebar {
-  display: grid;
-  align-items: center;
-  grid-template-columns: 280px minmax(0, 1fr) 190px;
-  border-bottom: 1px solid var(--ls-border);
-  background: color-mix(in srgb, var(--ls-panel) 88%, transparent);
-  padding: 0 16px;
-  backdrop-filter: blur(12px);
-  box-shadow: var(--ls-shadow-sm);
+  display: none;
 }
 .brand-block, .host-tabs, .window-actions, .panel-head, .panel-actions, .metric-head, .metric-body, .network-row, .statusbar { display: flex; align-items: center; }
 .brand-block { gap: 10px; }
@@ -167,12 +190,12 @@ textarea:focus {
 .tab-add { width: 34px; height: 34px; font-size: 20px; }
 .window-actions { justify-content: flex-end; gap: 8px; }
 .window-actions button { width: 30px; height: 28px; }
-.workspace-body { display: grid; min-height: 0; grid-template-columns: 52px 292px minmax(0, 1fr); gap: 10px; padding: 10px; }
-.icon-rail { display: flex; align-items: center; flex-direction: column; gap: 12px; border-radius: 14px; padding: 10px 8px; }
+.workspace-body { display: grid; min-height: 0; grid-template-columns: 52px 260px minmax(0, 1fr); gap: 8px; padding: 8px; }
+.icon-rail { display: flex; align-items: center; flex-direction: column; gap: 9px; border-radius: 14px; padding: 8px; }
 .rail-item { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 10px; font-size: 16px; }
 .rail-item--active, .rail-item:hover { border-color: var(--ls-primary); background: var(--ls-primary-soft); color: var(--ls-primary); }
 .rail-spacer { flex: 1; }
-.monitor-panel { display: flex; min-height: 0; flex-direction: column; gap: 6px; overflow: auto; border-radius: 8px; padding: 6px; }
+.monitor-panel { display: flex; min-height: 0; flex-direction: column; gap: 4px; overflow: hidden; border-radius: 8px; padding: 6px; }
 .system-card, .metric-card, .disk-card, .panel { border-radius: 12px; }
 .system-summary { padding: 12px; }
 .system-summary h2 { margin: 0 0 12px; font-size: 16px; }
@@ -201,9 +224,9 @@ textarea:focus {
 .disk-row em { display: block; height: 4px; border-radius: 999px; background: linear-gradient(90deg, var(--ls-success), var(--ls-warning)); }
 .workspace-main { display: grid; min-width: 0; min-height: 0; grid-template-rows: minmax(280px, 1fr) 10px minmax(260px, 0.94fr); }
 .panel { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; }
-.panel-head { justify-content: space-between; min-height: 40px; border-bottom: 1px solid var(--ls-border); background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-strong)); padding: 0 12px; }
+.panel-head { justify-content: space-between; min-height: 36px; border-bottom: 1px solid var(--ls-border); background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-strong)); padding: 0 10px; }
 .panel-head > div:first-child { display: inline-flex; align-items: center; gap: 8px; }
-.panel-actions { gap: 8px; color: var(--ls-text-muted); font-size: 12px; }
+.panel-actions { gap: 6px; color: var(--ls-text-muted); font-size: 12px; }
 .panel-actions button { height: 26px; padding: 0 8px; }
 .status-chip { display: inline-flex; align-items: center; height: 24px; border: 1px solid var(--ls-border); border-radius: 999px; background: var(--ls-panel-soft); color: var(--ls-text); padding: 0 9px; }
 .workspace-terminal, .workspace-sftp { min-width: 0; min-height: 0; flex: 1; overflow: hidden; }
@@ -212,17 +235,17 @@ textarea:focus {
 .splitter { display: grid; place-items: center; color: var(--ls-text-muted); }
 .splitter span { border-radius: 999px; background: color-mix(in srgb, var(--ls-border-strong) 50%, transparent); padding: 0 18px; line-height: 10px; }
 .file-actions input { width: 170px; height: 26px; padding: 0 9px; }
-.statusbar { gap: 28px; border-top: 1px solid var(--ls-border); background: color-mix(in srgb, var(--ls-panel) 92%, transparent); color: var(--ls-text-muted); padding: 0 16px; font-size: 12px; box-shadow: var(--ls-shadow-sm); }
+.statusbar { gap: 22px; min-height: 32px; border-top: 1px solid var(--ls-border); background: color-mix(in srgb, var(--ls-panel) 92%, transparent); color: var(--ls-text-muted); padding: 0 12px; font-size: 12px; box-shadow: var(--ls-shadow-sm); }
 .pro-badge { border-radius: 6px; background: var(--ls-success); color: #fff; padding: 2px 8px; }
 .statusbar-spacer { flex: 1; }
 .workspace-terminal .terminal-layout, .workspace-sftp .sftp-layout { height: 100%; padding: 0; gap: 0; }
 .workspace-terminal .toolbar, .workspace-sftp .toolbar { display: none; }
-.workspace-terminal .content-grid { height: 100%; grid-template-columns: minmax(0, 1fr); padding: 8px; }
-.workspace-sftp .content-grid { height: 100%; grid-template-columns: minmax(0, 1fr); padding: 8px; }
+.workspace-terminal .content-grid { height: 100%; grid-template-columns: minmax(0, 1fr); padding: 6px; }
+.workspace-sftp .content-grid { height: 100%; grid-template-columns: minmax(0, 1fr); padding: 6px; }
 .workspace-terminal .workspace-card, .workspace-sftp .browser-card { border-color: var(--ls-border); border-radius: 10px; background: var(--ls-panel); }
-.workspace-terminal .terminal-card { padding: 8px; }
-.workspace-terminal .tabs-bar { min-height: 36px; padding: 5px 8px; }
-.workspace-sftp .path-bar { padding: 8px; }
+.workspace-terminal .terminal-card { padding: 6px; }
+.workspace-terminal .tabs-bar { min-height: 34px; padding: 4px 8px; }
+.workspace-sftp .path-bar { padding: 6px; }
 
 /* Cross-view Bootstrap-like theme normalization. These selectors intentionally
    outrank page-level scoped styles so all panels keep the same visual language. */
@@ -254,6 +277,15 @@ textarea:focus {
   color: var(--ls-text-muted);
 }
 
+.workspace-shell .workspace-sftp .sftp-layout .status-strip {
+  padding: 7px 10px;
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .action-bar {
+  min-height: 34px;
+  padding: 5px 8px;
+}
+
 .workspace-shell .workspace-sftp .sftp-layout .status-strip--online {
   color: var(--ls-success);
 }
@@ -282,6 +314,12 @@ textarea:focus {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 1px 1px rgba(16, 24, 40, 0.06);
 }
 
+.workspace-shell .workspace-sftp .sftp-layout .action-button,
+.workspace-shell .workspace-sftp .sftp-layout .ghost-button {
+  height: 26px;
+  padding: 0 8px;
+}
+
 .workspace-shell .workspace-sftp .sftp-layout .action-button:hover:not(:disabled),
 .workspace-shell .workspace-sftp .sftp-layout .ghost-button:hover:not(:disabled),
 .workspace-shell .monitor-toggle:hover,
@@ -306,12 +344,20 @@ textarea:focus {
   background: var(--ls-panel);
   color: var(--ls-text);
   box-shadow: inset 0 1px 2px rgba(16, 24, 40, 0.08);
+  min-height: 28px;
+  padding: 0 10px;
 }
 
 .workspace-shell .workspace-sftp .sftp-layout .error-box {
   border-color: color-mix(in srgb, var(--ls-danger) 40%, var(--ls-border));
   background: color-mix(in srgb, var(--ls-danger) 10%, var(--ls-panel));
   color: var(--ls-danger);
+}
+
+.workspace-shell .workspace-sftp .sftp-layout .table-wrap {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
 }
 
 .workspace-shell .workspace-sftp .sftp-layout .file-table {
@@ -322,11 +368,14 @@ textarea:focus {
   border-color: var(--ls-border);
   background: linear-gradient(180deg, var(--ls-panel-strong), var(--ls-panel-soft));
   color: var(--ls-text-muted);
+  height: 28px;
 }
 
 .workspace-shell .workspace-sftp .sftp-layout .file-table td {
   border-color: color-mix(in srgb, var(--ls-border) 72%, transparent);
   color: var(--ls-text);
+  height: 28px;
+  padding: 0 10px;
 }
 
 .workspace-shell .workspace-sftp .sftp-layout .file-table tbody tr:nth-child(even) {
@@ -385,4 +434,62 @@ textarea:focus {
   background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-soft));
 }
 
-@media (max-width: 1260px) { .workspace-body { grid-template-columns: 48px 240px minmax(0, 1fr); } }
+.workspace-shell .monitor-panel .monitor-stack {
+  gap: 6px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.workspace-shell .monitor-panel .compact-section,
+.workspace-shell .monitor-panel .monitor-empty {
+  border-radius: 7px;
+}
+
+.workspace-shell .monitor-panel .compact-section--plain {
+  gap: 2px;
+  padding: 6px;
+}
+
+.workspace-shell .monitor-panel .host-line,
+.workspace-shell .monitor-panel .metric-line--text {
+  grid-template-columns: 30px minmax(0, 1fr);
+  min-height: 18px;
+}
+
+.workspace-shell .monitor-panel .metric-line {
+  grid-template-columns: 30px minmax(0, 1fr) 66px;
+  min-height: 18px;
+  gap: 5px;
+}
+
+.workspace-shell .monitor-panel .host-line span,
+.workspace-shell .monitor-panel .metric-line span,
+.workspace-shell .monitor-panel .host-line strong,
+.workspace-shell .monitor-panel .metric-line strong,
+.workspace-shell .monitor-panel .network-row strong,
+.workspace-shell .monitor-panel .disk-row strong {
+  font-size: 10px;
+}
+
+.workspace-shell .monitor-panel .thin-progress {
+  height: 9px;
+}
+
+.workspace-shell .monitor-panel .section-title,
+.workspace-shell .monitor-panel .disk-table__head {
+  height: 22px;
+  padding: 0 6px;
+}
+
+.workspace-shell .monitor-panel .network-row,
+.workspace-shell .monitor-panel .disk-row {
+  min-height: 20px;
+  padding-inline: 6px;
+}
+
+.workspace-shell .monitor-panel .disk-progress {
+  height: 3px;
+}
+
+@media (max-width: 1260px) { .workspace-body { grid-template-columns: 48px 238px minmax(0, 1fr); } }
