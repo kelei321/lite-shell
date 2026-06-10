@@ -8,6 +8,7 @@ export interface HostProfile {
   port: number;
   username: string;
   group: string;
+  remark?: string;
   lastConnectedAt?: number;
   createdAt: number;
   updatedAt: number;
@@ -20,6 +21,7 @@ export interface HostProfileInput {
   port: number;
   username: string;
   group?: string;
+  remark?: string;
 }
 
 const STORAGE_KEY = 'lite-shell:hosts:v1';
@@ -47,6 +49,7 @@ function normalizeHost(input: HostProfileInput, now = Date.now()): HostProfile {
     port: Number(input.port) || 22,
     username: input.username.trim(),
     group: normalizeGroup(input.group),
+    remark: input.remark?.trim() || undefined,
     createdAt: now,
     updatedAt: now,
   };
@@ -69,6 +72,7 @@ function loadHosts(): HostProfile[] {
         port: Number(item.port) || 22,
         username: String(item.username),
         group: normalizeGroup(item.group),
+        remark: typeof item.remark === 'string' && item.remark.trim() ? item.remark.trim() : undefined,
         lastConnectedAt: Number.isFinite(item.lastConnectedAt) ? Number(item.lastConnectedAt) : undefined,
         createdAt: Number.isFinite(item.createdAt) ? Number(item.createdAt) : Date.now(),
         updatedAt: Number.isFinite(item.updatedAt) ? Number(item.updatedAt) : Date.now(),
@@ -92,7 +96,7 @@ export const useHostStore = defineStore('hosts', () => {
     [...hosts.value]
       .filter((host) => host.lastConnectedAt)
       .sort((left, right) => (right.lastConnectedAt || 0) - (left.lastConnectedAt || 0))
-      .slice(0, 5),
+      .slice(0, 8),
   );
   const groups = computed(() => {
     const names = hosts.value.map((host) => normalizeGroup(host.group));
