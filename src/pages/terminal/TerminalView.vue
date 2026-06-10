@@ -19,6 +19,10 @@
           </div>
 
           <label><span>名称</span><input v-model.trim="form.name" autocomplete="off" placeholder="生产服务器" /></label>
+          <label><span>分组</span><input v-model.trim="form.group" autocomplete="off" list="host-group-options" placeholder="默认分组" /></label>
+          <datalist id="host-group-options">
+            <option v-for="group in hostStore.groups" :key="group" :value="group"></option>
+          </datalist>
           <label><span>主机</span><input v-model.trim="form.host" autocomplete="off" placeholder="127.0.0.1" /></label>
           <label><span>端口</span><input v-model.number="form.port" min="1" max="65535" type="number" /></label>
           <label><span>用户名</span><input v-model.trim="form.username" autocomplete="username" placeholder="root" /></label>
@@ -33,12 +37,63 @@
         </form>
 
         <section class="host-list-card">
-          <h3>主机列表</h3>
+          <div class="panel-title-row">
+            <h3>主机列表</h3>
+            <span class="host-count">{{ filteredHosts.length }}/{{ hostStore.sortedHosts.length }}</span>
+          </div>
+
+          <input v-model.trim="hostSearch" class="host-search" autocomplete="off" placeholder="搜索名称、地址、用户、分组" />
+
+          <div v-if="hostStore.recentHosts.length" class="recent-strip">
+            <span>最近</span>
+            <button v-for="host in hostStore.recentHosts" :key="host.id" type="button" @click="selectHost(host)">
+              {{ host.name }}
+            </button>
+          </div>
+
+          <div class="group-filter-row">
+            <button
+              class="group-filter"
+              :class="{ 'group-filter--active': selectedGroup === '' }"
+              type="button"
+              @click="selectedGroup = ''"
+            >
+              全部
+            </button>
+            <button
+              v-for="group in hostStore.groups"
+              :key="group"
+              class="group-filter"
+              :class="{ 'group-filter--active': selectedGroup === group }"
+              type="button"
+              @click="selectedGroup = group"
+            >
+              {{ group }}
+            </button>
+          </div>
+
           <p v-if="hostStore.sortedHosts.length === 0" class="empty-tip">暂无主机，填写上方表单后点击保存。</p>
-          <button v-for="host in hostStore.sortedHosts" :key="host.id" class="host-item" type="button" @click="selectHost(host)">
-            <span class="host-item__name">{{ host.name }}</span>
-            <span class="host-item__meta">{{ host.username }}@{{ host.host }}:{{ host.port }}</span>
-          </button>
+          <p v-else-if="filteredHosts.length === 0" class="empty-tip">没有匹配的主机。</p>
+
+          <div v-else class="grouped-hosts">
+            <section v-for="group in groupedFilteredHosts" :key="group.name" class="host-group">
+              <div class="host-group__head">
+                <span>{{ group.name }}</span>
+                <em>{{ group.hosts.length }}</em>
+              </div>
+              <button
+                v-for="host in group.hosts"
+                :key="host.id"
+                class="host-item"
+                type="button"
+                @click="selectHost(host)"
+              >
+                <span class="host-item__name">{{ host.name }}</span>
+                <span class="host-item__meta">{{ host.username }}@{{ host.host }}:{{ host.port }}</span>
+                <span v-if="host.lastConnectedAt" class="host-item__recent">最近：{{ formatRecentTime(host.lastConnectedAt) }}</span>
+              </button>
+            </section>
+          </div>
         </section>
 
         <section class="quick-card">
@@ -109,15 +164,40 @@ const hostStore = useHostStore();
 const workspaceStore = useWorkspaceStore();
 const quickCommands = ['pwd', 'ls -la', 'df -h', 'free -m', 'top'];
 
-const form = reactive({ id: '', name: '', host: '127.0.0.1', port: 22, username: 'root', password: '' });
+const form = reactive({ id: '', name: '', group: '默认分组', host: '127.0.0.1', port: 22, username: 'root', password: '' });
 const tabs = ref<TerminalTab[]>([]);
 const activeTabId = ref('');
 const connecting = ref(false);
+const hostSearch = ref('');
+const selectedGroup = ref('');
 const terminalHosts = new Map<string, HTMLDivElement>();
 
 const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId.value));
 const canSave = computed(() => Boolean(form.host.trim() && form.username.trim()));
 const canConnect = computed(() => Boolean(canSave.value && form.password));
+const filteredHosts = computed(() => {
+  const keyword = hostSearch.value.trim().toLowerCase();
+
+  return hostStore.sortedHosts.filter((host) => {
+    const matchesGroup = !selectedGroup.value || host.group === selectedGroup.value;
+    const haystack = [host.name, host.group, host.host, host.username, String(host.port)]
+      .join(' ')
+      .toLowerCase();
+    return matchesGroup && (!keyword || haystack.includes(keyword));
+  });
+});
+const groupedFilteredHosts = computed(() => {
+  const groups = new Map<string, HostProfile[]>();
+
+  for (const host of filteredHosts.value) {
+    const groupName = host.group || '默认分组';
+    const groupHosts = groups.get(groupName) || [];
+    groupHosts.push(host);
+    groups.set(groupName, groupHosts);
+  }
+
+  return [...groups.entries()].map(([name, hosts]) => ({ name, hosts }));
+});
 
 let unlisten: UnlistenFn | undefined;
 
@@ -143,6 +223,7 @@ onBeforeUnmount(() => {
 function resetForm() {
   form.id = '';
   form.name = '';
+  form.group = selectedGroup.value || '默认分组';
   form.host = '127.0.0.1';
   form.port = 22;
   form.username = 'root';
@@ -152,6 +233,7 @@ function resetForm() {
 function selectHost(host: HostProfile) {
   form.id = host.id;
   form.name = host.name;
+  form.group = host.group || '默认分组';
   form.host = host.host;
   form.port = host.port;
   form.username = host.username;
@@ -160,7 +242,7 @@ function selectHost(host: HostProfile) {
 
 function saveHost() {
   if (!canSave.value) return undefined;
-  const host = hostStore.upsertHost({ id: form.id || undefined, name: form.name, host: form.host, port: form.port, username: form.username });
+  const host = hostStore.upsertHost({ id: form.id || undefined, name: form.name, group: form.group, host: form.host, port: form.port, username: form.username });
   if (host) selectHost(host);
   return host;
 }
@@ -342,6 +424,10 @@ function fitVisibleTab(tab: TerminalTab, options: { resizeRemote: boolean }) {
   void invoke('ssh_resize', { id: tab.sessionId, cols, rows });
 }
 
+function formatRecentTime(timestamp: number) {
+  return new Date(timestamp).toLocaleString();
+}
+
 function createId() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -361,23 +447,34 @@ function createId() {
 .connect-card, .host-list-card, .quick-card, .workspace-card { border: 1px solid #1e293b; border-radius: 16px; background: #0f172a; }
 .connect-card, .host-list-card, .quick-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; }
 .host-list-card { min-height: 0; overflow: auto; }
-.panel-title-row { display: flex; align-items: center; justify-content: space-between; }
+.panel-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .connect-card label { display: grid; gap: 6px; }
 .connect-card span { color: #94a3b8; font-size: 12px; }
-.connect-card input { width: 100%; height: 36px; border: 1px solid #334155; border-radius: 10px; outline: none; background: #020617; color: #e5e7eb; padding: 0 10px; }
-.connect-card input:focus { border-color: #2563eb; }
+.connect-card input, .host-search { width: 100%; height: 36px; border: 1px solid #334155; border-radius: 10px; outline: none; background: #020617; color: #e5e7eb; padding: 0 10px; }
+.connect-card input:focus, .host-search:focus { border-color: #2563eb; }
 .action-row { display: grid; grid-template-columns: 1fr 86px; gap: 10px; margin-top: 4px; }
-.primary-button, .ghost-button, .command-button, .tiny-button, .host-item, .tab-item { border-radius: 10px; color: #fff; cursor: pointer; }
+.primary-button, .ghost-button, .command-button, .tiny-button, .host-item, .tab-item, .group-filter, .recent-strip button { border-radius: 10px; color: #fff; cursor: pointer; }
 .primary-button, .ghost-button, .command-button { height: 36px; }
 .primary-button { background: #2563eb; }
-.ghost-button, .command-button, .tiny-button { border: 1px solid #334155; background: #1e293b; }
+.ghost-button, .command-button, .tiny-button, .group-filter, .recent-strip button { border: 1px solid #334155; background: #1e293b; }
 .tiny-button { height: 28px; padding: 0 10px; color: #cbd5e1; }
 .primary-button:disabled, .ghost-button:disabled, .command-button:disabled { opacity: 0.45; cursor: not-allowed; }
-.empty-tip, .empty-tabs, .welcome-card p { color: #94a3b8; font-size: 13px; }
+.empty-tip, .empty-tabs, .welcome-card p, .host-count { color: #94a3b8; font-size: 13px; }
+.recent-strip { display: flex; align-items: center; gap: 6px; overflow-x: auto; }
+.recent-strip span { flex: 0 0 auto; color: #94a3b8; font-size: 12px; }
+.recent-strip button { height: 26px; flex: 0 0 auto; max-width: 118px; overflow: hidden; color: #cbd5e1; padding: 0 8px; text-overflow: ellipsis; white-space: nowrap; }
+.recent-strip button:hover, .group-filter:hover { border-color: #2563eb; }
+.group-filter-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.group-filter { min-height: 26px; color: #cbd5e1; padding: 0 8px; font-size: 12px; }
+.group-filter--active { border-color: #2563eb; background: rgba(37, 99, 235, 0.24); color: #bfdbfe; }
+.grouped-hosts { display: grid; gap: 10px; }
+.host-group { display: grid; gap: 6px; }
+.host-group__head { display: flex; align-items: center; justify-content: space-between; color: #cbd5e1; font-size: 12px; }
+.host-group__head em { color: #64748b; font-style: normal; }
 .host-item { display: grid; gap: 4px; border: 1px solid #1e293b; background: #111827; padding: 10px; text-align: left; }
 .host-item:hover { border-color: #2563eb; }
 .host-item__name { color: #f8fafc; font-size: 14px; }
-.host-item__meta { color: #94a3b8; font-size: 12px; }
+.host-item__meta, .host-item__recent { color: #94a3b8; font-size: 12px; }
 .quick-card { flex: 0 0 auto; }
 .command-button { text-align: left; padding: 0 10px; }
 .workspace-card { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; }
