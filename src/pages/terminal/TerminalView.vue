@@ -1,5 +1,5 @@
 <template>
-  <section class="terminal-layout" :class="themeClass">
+  <section class="terminal-layout">
     <header class="toolbar">
       <div>
         <h2>SSH 终端</h2>
@@ -250,7 +250,7 @@ interface TerminalTab {
 
 type TerminalTheme = 'light' | 'dark';
 
-const THEME_STORAGE_KEY = 'lite-shell.terminal.theme';
+const THEME_STORAGE_KEY = 'lite-shell.theme';
 const hostStore = useHostStore();
 const workspaceStore = useWorkspaceStore();
 
@@ -268,7 +268,6 @@ const activeTab = computed(() => tabs.value.find((tab) => tab.id === activeTabId
 const canSave = computed(() => Boolean(form.host.trim() && form.username.trim()));
 const canConnect = computed(() => Boolean(canSave.value && form.password));
 const isDarkTheme = computed(() => theme.value === 'dark');
-const themeClass = computed(() => `terminal-layout--${theme.value}`);
 const quickHosts = computed(() => hostStore.recentHosts.length ? hostStore.recentHosts : hostStore.sortedHosts.slice(0, 9));
 const filteredHosts = computed(() => {
   const keyword = hostSearch.value.trim().toLowerCase();
@@ -346,9 +345,14 @@ function closeConnectionManager() {
 }
 
 function toggleTheme() {
-  theme.value = isDarkTheme.value ? 'light' : 'dark';
+  applyTheme(isDarkTheme.value ? 'light' : 'dark');
+}
+
+function applyTheme(nextTheme: TerminalTheme) {
+  theme.value = nextTheme;
+  document.documentElement.dataset.theme = nextTheme;
   try {
-    localStorage.setItem(THEME_STORAGE_KEY, theme.value);
+    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
   } catch {
     // Ignore localStorage quota or privacy-mode failures.
   }
@@ -357,9 +361,9 @@ function toggleTheme() {
 function restoreThemePreference() {
   try {
     const value = localStorage.getItem(THEME_STORAGE_KEY);
-    if (value === 'light' || value === 'dark') theme.value = value;
+    applyTheme(value === 'dark' ? 'dark' : 'light');
   } catch {
-    // Ignore localStorage read failures.
+    applyTheme('light');
   }
 }
 
@@ -600,23 +604,6 @@ function createId() {
 
 <style scoped>
 .terminal-layout {
-  --ls-bg: #f4f6f8;
-  --ls-panel: #ffffff;
-  --ls-panel-soft: #f8f9fa;
-  --ls-panel-strong: #eef1f4;
-  --ls-border: #d7dde4;
-  --ls-border-strong: #bdc6d0;
-  --ls-text: #1f2937;
-  --ls-text-muted: #667085;
-  --ls-primary: #0d6efd;
-  --ls-primary-hover: #0b5ed7;
-  --ls-primary-soft: #e7f1ff;
-  --ls-success: #22c55e;
-  --ls-shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.72);
-  --ls-shadow-md: 0 10px 28px rgba(16, 24, 40, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.8);
-  --ls-terminal-bg: #020617;
-  --ls-terminal-text: #e5e7eb;
-
   display: flex;
   flex: 1;
   min-width: 0;
@@ -625,23 +612,6 @@ function createId() {
   padding: 18px;
   background: var(--ls-bg);
   color: var(--ls-text);
-}
-
-.terminal-layout--dark {
-  --ls-bg: #0e1624;
-  --ls-panel: #121c2b;
-  --ls-panel-soft: #0f1726;
-  --ls-panel-strong: #182235;
-  --ls-border: #253349;
-  --ls-border-strong: #33445e;
-  --ls-text: #f1f5f9;
-  --ls-text-muted: #98a6b8;
-  --ls-primary: #2f81ff;
-  --ls-primary-hover: #1f6feb;
-  --ls-primary-soft: rgba(47, 129, 255, 0.16);
-  --ls-success: #2ecc71;
-  --ls-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  --ls-shadow-md: 0 18px 42px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .toolbar,
@@ -955,12 +925,6 @@ function createId() {
 .manager-toolbar select {
   width: 100%;
   min-width: 0;
-  border: 1px solid var(--ls-border);
-  border-radius: 8px;
-  outline: none;
-  background: var(--ls-panel);
-  color: var(--ls-text);
-  box-shadow: inset 0 1px 2px rgba(16, 24, 40, 0.08);
   padding: 0 10px;
 }
 
@@ -974,14 +938,6 @@ function createId() {
   min-height: 74px;
   padding: 9px 10px;
   resize: vertical;
-}
-
-.quick-connect-form input:focus,
-.manager-editor input:focus,
-.manager-editor textarea:focus,
-.search-control:focus-within {
-  border-color: var(--ls-primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ls-primary) 16%, transparent), inset 0 1px 2px rgba(16, 24, 40, 0.08);
 }
 
 .security-tip {
