@@ -172,6 +172,7 @@ const transferTasks = ref<TransferTask[]>([]);
 const actionLoading = ref(false);
 const actionMessage = ref('');
 const actionStatusText = ref('');
+let disposed = false;
 let unlistenTransferProgress: UnlistenFn | undefined;
 
 const activeHost = computed(() => workspaceStore.activeHost);
@@ -250,17 +251,26 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  disposed = true;
   unlistenTransferProgress?.();
   void closeAllSessions();
 });
 
 async function setupTransferProgressListener() {
-  unlistenTransferProgress = await listen<SftpTransferProgressPayload>(
+  const unlisten = await listen<SftpTransferProgressPayload>(
     'sftp-transfer-progress',
     (event: Event<SftpTransferProgressPayload>) => {
+      if (disposed) return;
       updateTransferProgress(event.payload);
     },
   );
+
+  if (disposed) {
+    unlisten();
+    return;
+  }
+
+  unlistenTransferProgress = unlisten;
 }
 
 function updateTransferProgress(payload: SftpTransferProgressPayload) {
