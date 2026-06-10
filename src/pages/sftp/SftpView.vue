@@ -89,14 +89,38 @@
             </tbody>
           </table>
         </div>
+
+        <section v-if="transferTasks.length" class="transfer-panel">
+          <div class="transfer-panel__head">
+            <strong>传输任务</strong>
+            <span>{{ activeTransferCount ? `${activeTransferCount} 个进行中` : '全部完成' }}</span>
+          </div>
+          <div class="transfer-list">
+            <div v-for="task in transferTasks" :key="task.id" class="transfer-task">
+              <div class="transfer-task__meta">
+                <span class="transfer-task__type">{{ task.type === 'upload' ? '上传' : '下载' }}</span>
+                <strong>{{ task.name }}</strong>
+                <span>{{ transferStatusText(task.status) }}</span>
+              </div>
+              <div class="transfer-progress">
+                <i :class="`transfer-progress__bar transfer-progress__bar--${task.status}`" :style="{ width: progressWidth(task.percent) }"></i>
+              </div>
+              <div class="transfer-task__foot">
+                <span>{{ formatSize(task.transferredBytes) }} / {{ task.totalBytes ? formatSize(task.totalBytes) : '-' }}</span>
+                <span>{{ formatPercent(task.percent) }}</span>
+              </div>
+            </div>
+          </div>
+        </section>
       </section>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
+import { type Event, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { ask, open, save } from '@tauri-apps/plugin-dialog';
 
 import { type WorkspaceCredential, type WorkspaceHost, useWorkspaceStore } from '@/stores/workspace';
@@ -118,13 +142,38 @@ interface SftpSessionState {
   errorMessage: string;
 }
 
+interface SftpTransferProgressPayload {
+  transferId: string;
+  transferredBytes: number;
+  totalBytes: number;
+  percent: number;
+  status: TransferStatus;
+}
+
+type TransferStatus = 'running' | 'success' | 'failed';
+type TransferType = 'upload' | 'download';
+
+interface TransferTask {
+  id: string;
+  type: TransferType;
+  name: string;
+  transferredBytes: number;
+  totalBytes: number;
+  percent: number;
+  status: TransferStatus;
+  createdAt: number;
+}
+
 const workspaceStore = useWorkspaceStore();
 
 const sessionsByHostId = shallowRef<Record<string, SftpSessionState>>({});
 const selectedItem = ref<RemoteFileItem | null>(null);
+const transferTasks = ref<TransferTask[]>([]);
 const actionLoading = ref(false);
 const actionMessage = ref('');
 const actionStatusText = ref('');
+let disposed = false;
+let unlistenTransferProgress: UnlistenFn | undefined;
 
 const activeHost = computed(() => workspaceStore.activeHost);
 const cachedCredential = computed(() =>
@@ -152,6 +201,9 @@ const canRunSelectedAction = computed(() =>
 );
 const canDownload = computed(() =>
   Boolean(canRunConnectedAction.value && selectedItem.value && !selectedItem.value.isDir),
+);
+const activeTransferCount = computed(
+  () => transferTasks.value.filter((task) => task.status === 'running').length,
 );
 const activeHostLabel = computed(() => {
   const host = activeHost.value;
@@ -194,9 +246,46 @@ watch(
   },
 );
 
+onMounted(() => {
+  void setupTransferProgressListener();
+});
+
 onBeforeUnmount(() => {
+  disposed = true;
+  unlistenTransferProgress?.();
   void closeAllSessions();
 });
+
+async function setupTransferProgressListener() {
+  const unlisten = await listen<SftpTransferProgressPayload>(
+    'sftp-transfer-progress',
+    (event: Event<SftpTransferProgressPayload>) => {
+      if (disposed) return;
+      updateTransferProgress(event.payload);
+    },
+  );
+
+  if (disposed) {
+    unlisten();
+    return;
+  }
+
+  unlistenTransferProgress = unlisten;
+}
+
+function updateTransferProgress(payload: SftpTransferProgressPayload) {
+  transferTasks.value = transferTasks.value.map((task) => {
+    if (task.id !== payload.transferId) return task;
+
+    return {
+      ...task,
+      transferredBytes: payload.transferredBytes,
+      totalBytes: payload.totalBytes,
+      percent: payload.percent,
+      status: payload.status,
+    };
+  });
+}
 
 async function syncSftpWithWorkspaceHost() {
   const host = workspaceStore.activeHost;
@@ -454,20 +543,28 @@ async function uploadFile() {
   const remotePath = joinRemotePath(snapshot.currentPath, fileName);
   const overwrite = files.value.some((file) => file.path === remotePath);
 
-  if (overwrite && !window.confirm(`远程文件 ${fileName} 已存在，是否覆盖？`)) {
-    return;
+  if (overwrite) {
+    const confirmed = await ask(`远程文件「${fileName}」已存在，是否覆盖？\n\n覆盖后原文件内容不可恢复。`, {
+      title: '确认覆盖',
+      kind: 'warning',
+    });
+    if (!confirmed) return;
   }
+
+  const transferId = createTransferTask('upload', fileName);
 
   await runSftpAction({
     snapshot,
     loadingText: '正在上传...',
     successText: '上传完成。',
     failureText: '上传失败，请检查本地文件或远程目录权限。',
+    transferId,
     action: () =>
       invoke('sftp_upload_file', {
         connectionId: snapshot.connectionId,
         localPath,
         remotePath,
+        transferId,
       }),
   });
 }
@@ -485,16 +582,20 @@ async function downloadFile() {
 
   if (!localPath) return;
 
+  const transferId = createTransferTask('download', item.name, item.size);
+
   await runSftpAction({
     snapshot,
     loadingText: '正在下载...',
     successText: '下载完成。',
     failureText: '下载失败，请检查远程文件或本地保存路径。',
+    transferId,
     action: () =>
       invoke('sftp_download_file', {
         connectionId: snapshot.connectionId,
         remotePath: item.path,
         localPath,
+        transferId,
       }),
   });
 }
@@ -609,6 +710,7 @@ async function runSftpAction(options: {
   loadingText: string;
   successText: string;
   failureText: string;
+  transferId?: string;
   action: () => Promise<unknown>;
 }) {
   actionLoading.value = true;
@@ -628,6 +730,10 @@ async function runSftpAction(options: {
     selectedItem.value = null;
     actionMessage.value = options.successText;
   } catch {
+    if (options.transferId) {
+      markTransferFailed(options.transferId);
+    }
+
     const latest = sessionsByHostId.value[options.snapshot.hostId];
     if (!latest || latest.connectionId !== options.snapshot.connectionId) return;
     if (activeHost.value?.id !== options.snapshot.hostId) return;
@@ -636,6 +742,41 @@ async function runSftpAction(options: {
     actionLoading.value = false;
     actionStatusText.value = '';
   }
+}
+
+function createTransferTask(type: TransferType, name: string, totalBytes = 0) {
+  const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  transferTasks.value = [
+    {
+      id,
+      type,
+      name,
+      transferredBytes: 0,
+      totalBytes,
+      percent: 0,
+      status: 'running',
+      createdAt: Date.now(),
+    },
+    ...transferTasks.value,
+  ].slice(0, 8);
+  return id;
+}
+
+function markTransferFailed(transferId: string) {
+  transferTasks.value = transferTasks.value.map((task) =>
+    task.id === transferId
+      ? {
+          ...task,
+          status: 'failed',
+        }
+      : task,
+  );
+}
+
+function transferStatusText(status: TransferStatus) {
+  if (status === 'success') return '完成';
+  if (status === 'failed') return '失败';
+  return '传输中';
 }
 
 function joinRemotePath(basePath: string, name: string) {
@@ -663,6 +804,16 @@ function getParentPath(path: string) {
 
   if (index <= 0) return '/';
   return normalized.slice(0, index);
+}
+
+function formatPercent(value: number | undefined) {
+  if (value === undefined || Number.isNaN(value)) return '-';
+  return `${Math.min(100, Math.max(0, value)).toFixed(1)}%`;
+}
+
+function progressWidth(value: number | undefined) {
+  if (value === undefined || Number.isNaN(value)) return '0%';
+  return `${Math.min(100, Math.max(0, value))}%`;
 }
 
 function formatSize(size: number) {
@@ -776,7 +927,8 @@ function formatSize(size: number) {
   border-color: #f87171;
 }
 
-.action-button:disabled {
+.action-button:disabled,
+.ghost-button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
@@ -820,11 +972,6 @@ function formatSize(size: number) {
   background: #1e293b;
   color: #fff;
   cursor: pointer;
-}
-
-.ghost-button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
 }
 
 .error-box {
@@ -912,5 +1059,95 @@ function formatSize(size: number) {
   height: 180px;
   color: #94a3b8;
   text-align: center;
+}
+
+.transfer-panel {
+  border-top: 1px solid #1e293b;
+  background: rgba(2, 6, 23, 0.36);
+}
+
+.transfer-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  border-bottom: 1px solid #1e293b;
+  color: #cbd5e1;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.transfer-list {
+  display: grid;
+  max-height: 148px;
+  overflow: auto;
+  padding: 8px 10px;
+  gap: 8px;
+}
+
+.transfer-task {
+  display: grid;
+  gap: 5px;
+}
+
+.transfer-task__meta,
+.transfer-task__foot {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.transfer-task__meta {
+  grid-template-columns: 42px minmax(0, 1fr) 44px;
+}
+
+.transfer-task__meta strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #e5e7eb;
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-task__type {
+  color: #93c5fd;
+}
+
+.transfer-task__foot {
+  grid-template-columns: minmax(0, 1fr) 64px;
+}
+
+.transfer-task__foot span:last-child {
+  text-align: right;
+}
+
+.transfer-progress {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #1e293b;
+}
+
+.transfer-progress__bar {
+  display: block;
+  height: 100%;
+  transition: width 0.16s ease;
+}
+
+.transfer-progress__bar--running {
+  background: #38bdf8;
+}
+
+.transfer-progress__bar--success {
+  background: #22c55e;
+}
+
+.transfer-progress__bar--failed {
+  background: #ef4444;
 }
 </style>
