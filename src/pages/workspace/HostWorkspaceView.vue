@@ -27,7 +27,7 @@
       </div>
     </header>
 
-    <section class="workspace-body">
+    <section class="workspace-body" :style="{ gridTemplateColumns: workspaceBodyColumns }">
       <nav class="icon-rail" aria-label="workspace navigation">
         <button class="rail-item rail-item--active" title="终端" type="button">⌁</button>
         <button class="rail-item" title="文件" type="button">□</button>
@@ -38,11 +38,30 @@
         <button class="rail-item" title="主题" type="button">◐</button>
       </nav>
 
-      <aside class="monitor-panel">
-        <MonitorPanel />
+      <aside ref="monitorPanelRef" class="monitor-panel" :class="{ 'monitor-panel--collapsed': isMonitorCollapsed }">
+        <button
+          class="monitor-toggle"
+          :title="isMonitorCollapsed ? '展开监控面板' : '折叠监控面板'"
+          type="button"
+          @click="toggleMonitorPanel"
+        >
+          {{ isMonitorCollapsed ? '›' : '‹' }}
+        </button>
+        <div v-show="!isMonitorCollapsed" class="monitor-panel__content">
+          <MonitorPanel />
+        </div>
       </aside>
 
-      <section class="workspace-main">
+      <div
+        v-show="!isMonitorCollapsed"
+        class="workspace-vertical-splitter"
+        role="separator"
+        aria-label="调整监控面板宽度"
+        aria-orientation="vertical"
+        @pointerdown="startMonitorResize"
+      ></div>
+
+      <section ref="workspaceMainRef" class="workspace-main" :style="{ gridTemplateRows: workspaceMainRows }">
         <section class="panel terminal-panel">
           <header class="panel-head">
             <div><span class="online-dot" :class="{ 'online-dot--muted': !workspaceStore.hasActiveHost }"></span><strong>终端</strong></div>
@@ -52,7 +71,15 @@
           <div class="terminal-hints">命令提示：Ctrl + Shift + V 粘贴剪贴板　|　Alt + ↑/↓ 历史命令　|　Ctrl + L 清屏</div>
         </section>
 
-        <div class="splitter"><span>···</span></div>
+        <div
+          class="splitter"
+          role="separator"
+          aria-label="调整终端和 SFTP 高度"
+          aria-orientation="horizontal"
+          @pointerdown="startPanelResize"
+        >
+          <span>···</span>
+        </div>
 
         <section class="panel sftp-panel">
           <header class="panel-head">
@@ -69,14 +96,36 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 
 import SftpView from '@/pages/sftp/SftpView.vue';
 import TerminalView from '@/pages/terminal/TerminalView.vue';
 import MonitorPanel from '@/pages/workspace/components/MonitorPanel.vue';
 import { useWorkspaceStore } from '@/stores/workspace';
 
+type WorkspaceLayoutPreference = {
+  monitorCollapsed?: boolean;
+  monitorWidth?: number;
+  terminalRatio?: number;
+};
+
+const LAYOUT_STORAGE_KEY = 'lite-shell.workspace.layout';
+const DEFAULT_MONITOR_WIDTH = 292;
+const COLLAPSED_MONITOR_WIDTH = 42;
+const MIN_MONITOR_WIDTH = 220;
+const MAX_MONITOR_WIDTH = 420;
+const DEFAULT_TERMINAL_RATIO = 0.52;
+const MIN_PANEL_RATIO = 0.28;
+const MAX_PANEL_RATIO = 0.72;
+
 const workspaceStore = useWorkspaceStore();
+const workspaceMainRef = ref<HTMLElement | null>(null);
+const monitorPanelRef = ref<HTMLElement | null>(null);
+const terminalRatio = ref(DEFAULT_TERMINAL_RATIO);
+const monitorWidth = ref(DEFAULT_MONITOR_WIDTH);
+const isMonitorCollapsed = ref(false);
+const resizingPanel = ref(false);
+const resizingMonitor = ref(false);
 
 const activeHostLabel = computed(() => workspaceStore.activeHostLabel);
 const credentialLabel = computed(() =>
@@ -87,6 +136,138 @@ const activeUserLabel = computed(() => {
   if (!host) return '未连接';
   return `${host.username}@${host.host}`;
 });
+const workspaceMainRows = computed(() => {
+  const topRatio = terminalRatio.value.toFixed(3);
+  const bottomRatio = (1 - terminalRatio.value).toFixed(3);
+  return `minmax(180px, ${topRatio}fr) 10px minmax(160px, ${bottomRatio}fr)`;
+});
+const workspaceBodyColumns = computed(() => {
+  const monitorColumn = isMonitorCollapsed.value
+    ? `${COLLAPSED_MONITOR_WIDTH}px`
+    : `${monitorWidth.value}px`;
+  const splitterColumn = isMonitorCollapsed.value ? '0px' : '8px';
+
+  return `52px ${monitorColumn} ${splitterColumn} minmax(0, 1fr)`;
+});
+
+onMounted(() => {
+  restoreLayoutPreference();
+});
+
+onBeforeUnmount(() => {
+  stopPanelResize();
+  stopMonitorResize();
+});
+
+function toggleMonitorPanel() {
+  isMonitorCollapsed.value = !isMonitorCollapsed.value;
+  saveLayoutPreference();
+}
+
+function startPanelResize(event: PointerEvent) {
+  event.preventDefault();
+  resizingPanel.value = true;
+  document.body.classList.add('is-resizing-row');
+  window.addEventListener('pointermove', handlePanelResize);
+  window.addEventListener('pointerup', stopPanelResize);
+  window.addEventListener('pointercancel', stopPanelResize);
+}
+
+function handlePanelResize(event: PointerEvent) {
+  if (!resizingPanel.value || !workspaceMainRef.value) return;
+
+  const rect = workspaceMainRef.value.getBoundingClientRect();
+  const availableHeight = Math.max(1, rect.height - 10);
+  const nextRatio = clamp((event.clientY - rect.top) / availableHeight, MIN_PANEL_RATIO, MAX_PANEL_RATIO);
+  terminalRatio.value = Number(nextRatio.toFixed(3));
+}
+
+function stopPanelResize() {
+  if (!resizingPanel.value) return;
+
+  resizingPanel.value = false;
+  document.body.classList.remove('is-resizing-row');
+  window.removeEventListener('pointermove', handlePanelResize);
+  window.removeEventListener('pointerup', stopPanelResize);
+  window.removeEventListener('pointercancel', stopPanelResize);
+  saveLayoutPreference();
+}
+
+function startMonitorResize(event: PointerEvent) {
+  if (isMonitorCollapsed.value) return;
+
+  event.preventDefault();
+  resizingMonitor.value = true;
+  document.body.classList.add('is-resizing-column');
+  window.addEventListener('pointermove', handleMonitorResize);
+  window.addEventListener('pointerup', stopMonitorResize);
+  window.addEventListener('pointercancel', stopMonitorResize);
+}
+
+function handleMonitorResize(event: PointerEvent) {
+  if (!resizingMonitor.value || !monitorPanelRef.value) return;
+
+  const rect = monitorPanelRef.value.getBoundingClientRect();
+  monitorWidth.value = Math.round(clamp(event.clientX - rect.left, MIN_MONITOR_WIDTH, MAX_MONITOR_WIDTH));
+}
+
+function stopMonitorResize() {
+  if (!resizingMonitor.value) return;
+
+  resizingMonitor.value = false;
+  document.body.classList.remove('is-resizing-column');
+  window.removeEventListener('pointermove', handleMonitorResize);
+  window.removeEventListener('pointerup', stopMonitorResize);
+  window.removeEventListener('pointercancel', stopMonitorResize);
+  saveLayoutPreference();
+}
+
+function restoreLayoutPreference() {
+  const preference = readLayoutPreference();
+
+  if (!preference) return;
+
+  if (typeof preference.terminalRatio === 'number') {
+    terminalRatio.value = clamp(preference.terminalRatio, MIN_PANEL_RATIO, MAX_PANEL_RATIO);
+  }
+
+  if (typeof preference.monitorWidth === 'number') {
+    monitorWidth.value = Math.round(clamp(preference.monitorWidth, MIN_MONITOR_WIDTH, MAX_MONITOR_WIDTH));
+  }
+
+  if (typeof preference.monitorCollapsed === 'boolean') {
+    isMonitorCollapsed.value = preference.monitorCollapsed;
+  }
+}
+
+function readLayoutPreference(): WorkspaceLayoutPreference | null {
+  try {
+    const rawValue = localStorage.getItem(LAYOUT_STORAGE_KEY);
+    if (!rawValue) return null;
+
+    return JSON.parse(rawValue) as WorkspaceLayoutPreference;
+  } catch {
+    return null;
+  }
+}
+
+function saveLayoutPreference() {
+  const preference: WorkspaceLayoutPreference = {
+    monitorCollapsed: isMonitorCollapsed.value,
+    monitorWidth: monitorWidth.value,
+    terminalRatio: terminalRatio.value,
+  };
+
+  try {
+    localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(preference));
+  } catch {
+    // Ignore localStorage quota or privacy-mode failures.
+  }
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
 </script>
 
 <style scoped>
