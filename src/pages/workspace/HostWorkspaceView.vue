@@ -325,6 +325,88 @@ function clamp(value: number, min: number, max: number) {
   padding: 8px;
 }
 
+.monitor-panel {
+  min-width: 0;
+  transition: padding 0.16s ease;
+}
+
+.monitor-panel--collapsed {
+  align-items: center;
+  overflow: hidden;
+  padding: 6px 4px;
+}
+
+.monitor-panel__content {
+  min-width: 0;
+  min-height: 0;
+}
+
+.monitor-toggle {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  align-self: flex-end;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 7px;
+  background: rgba(2, 6, 23, 0.74);
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+.monitor-toggle:hover {
+  border-color: rgba(96, 165, 250, 0.5);
+  color: #dbeafe;
+}
+
+.monitor-panel--collapsed .monitor-toggle {
+  align-self: center;
+  margin-top: 2px;
+}
+
+.workspace-vertical-splitter {
+  display: grid;
+  min-width: 0;
+  place-items: center;
+  border-radius: 999px;
+  cursor: col-resize;
+}
+
+.workspace-vertical-splitter::before {
+  display: block;
+  width: 4px;
+  height: 54px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.24);
+  content: '';
+}
+
+.workspace-vertical-splitter:hover::before {
+  background: rgba(96, 165, 250, 0.6);
+}
+
+.splitter {
+  cursor: row-resize;
+}
+
+.splitter:hover span {
+  background: rgba(96, 165, 250, 0.52);
+  color: #dbeafe;
+}
+
+:global(body.is-resizing-row),
+:global(body.is-resizing-row *) {
+  cursor: row-resize !important;
+  user-select: none;
+}
+
+:global(body.is-resizing-column),
+:global(body.is-resizing-column *) {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
 @media (max-width: 1260px) {
   .workspace-terminal :deep(.content-grid) {
     grid-template-columns: 220px minmax(0, 1fr);
