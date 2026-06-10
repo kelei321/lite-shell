@@ -435,10 +435,9 @@ textarea:focus {
 }
 
 .workspace-shell .monitor-panel .monitor-stack {
-  gap: 6px;
+  height: 100%;
   min-height: 0;
-  overflow: auto;
-  padding-right: 2px;
+  overflow: hidden;
 }
 
 .workspace-shell .monitor-panel .compact-section,
@@ -449,6 +448,17 @@ textarea:focus {
 .workspace-shell .monitor-panel .compact-section--plain {
   gap: 2px;
   padding: 6px;
+}
+
+.workspace-shell .monitor-panel .compact-section--network,
+.workspace-shell .monitor-panel .compact-section--table {
+  min-height: 0;
+}
+
+.workspace-shell .monitor-panel .network-table,
+.workspace-shell .monitor-panel .disk-table__body {
+  min-height: 0;
+  overflow: auto;
 }
 
 .workspace-shell .monitor-panel .host-line,
