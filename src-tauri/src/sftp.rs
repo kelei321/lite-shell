@@ -5,13 +5,16 @@ use ssh2::{Session, Sftp};
 use std::{
     collections::HashMap,
     fs::File,
-    io::{self, BufReader, BufWriter},
+    io::{Read, Write},
     net::TcpStream,
     path::Path,
     sync::Arc,
 };
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
+
+const TRANSFER_PROGRESS_EVENT: &str = "sftp-transfer-progress";
+const TRANSFER_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Default)]
 pub struct SftpState {
@@ -41,6 +44,16 @@ pub struct RemoteFileItem {
     path: String,
     is_dir: bool,
     size: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpTransferProgressPayload {
+    transfer_id: String,
+    transferred_bytes: u64,
+    total_bytes: u64,
+    percent: f64,
+    status: String,
 }
 
 #[tauri::command]
@@ -82,24 +95,42 @@ pub fn sftp_close(state: State<SftpState>, connection_id: String) -> Result<(), 
 
 #[tauri::command]
 pub fn sftp_download_file(
+    app: AppHandle,
     state: State<SftpState>,
     connection_id: String,
     remote_path: String,
     local_path: String,
+    transfer_id: String,
 ) -> Result<(), String> {
-    inner_sftp_download_file(&state, &connection_id, &remote_path, &local_path)
-        .map_err(|error| error.to_string())
+    inner_sftp_download_file(
+        &app,
+        &state,
+        &connection_id,
+        &remote_path,
+        &local_path,
+        &transfer_id,
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub fn sftp_upload_file(
+    app: AppHandle,
     state: State<SftpState>,
     connection_id: String,
     local_path: String,
     remote_path: String,
+    transfer_id: String,
 ) -> Result<(), String> {
-    inner_sftp_upload_file(&state, &connection_id, &local_path, &remote_path)
-        .map_err(|error| error.to_string())
+    inner_sftp_upload_file(
+        &app,
+        &state,
+        &connection_id,
+        &local_path,
+        &remote_path,
+        &transfer_id,
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -174,43 +205,124 @@ fn inner_sftp_list_dir(
 }
 
 fn inner_sftp_download_file(
+    app: &AppHandle,
     state: &SftpState,
     connection_id: &str,
     remote_path: &str,
     local_path: &str,
+    transfer_id: &str,
 ) -> Result<()> {
     let handle = get_sftp_handle(state, connection_id)?;
     let sftp = handle.sftp.lock();
+    let total_bytes = sftp
+        .stat(Path::new(remote_path))
+        .ok()
+        .and_then(|stat| stat.size)
+        .unwrap_or(0);
     let mut remote_file = sftp
         .open(Path::new(remote_path))
         .with_context(|| format!("open remote file failed: {remote_path}"))?;
-    let local_file = File::create(local_path)
+    let mut local_file = File::create(local_path)
         .with_context(|| format!("create local file failed: {local_path}"))?;
-    let mut writer = BufWriter::new(local_file);
-    io::copy(&mut remote_file, &mut writer).with_context(|| {
-        format!("copy remote file to local failed: {remote_path} -> {local_path}")
-    })?;
+
+    emit_transfer_progress(app, transfer_id, 0, total_bytes, "running");
+    copy_with_progress(
+        app,
+        transfer_id,
+        &mut remote_file,
+        &mut local_file,
+        total_bytes,
+    )
+    .with_context(|| format!("copy remote file to local failed: {remote_path} -> {local_path}"))?;
+    emit_transfer_progress(app, transfer_id, total_bytes, total_bytes, "success");
     Ok(())
 }
 
 fn inner_sftp_upload_file(
+    app: &AppHandle,
     state: &SftpState,
     connection_id: &str,
     local_path: &str,
     remote_path: &str,
+    transfer_id: &str,
 ) -> Result<()> {
     let handle = get_sftp_handle(state, connection_id)?;
-    let local_file =
+    let mut local_file =
         File::open(local_path).with_context(|| format!("open local file failed: {local_path}"))?;
-    let mut reader = BufReader::new(local_file);
+    let total_bytes = local_file
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
     let sftp = handle.sftp.lock();
     let mut remote_file = sftp
         .create(Path::new(remote_path))
         .with_context(|| format!("create remote file failed: {remote_path}"))?;
-    io::copy(&mut reader, &mut remote_file).with_context(|| {
-        format!("copy local file to remote failed: {local_path} -> {remote_path}")
-    })?;
+
+    emit_transfer_progress(app, transfer_id, 0, total_bytes, "running");
+    copy_with_progress(
+        app,
+        transfer_id,
+        &mut local_file,
+        &mut remote_file,
+        total_bytes,
+    )
+    .with_context(|| format!("copy local file to remote failed: {local_path} -> {remote_path}"))?;
+    emit_transfer_progress(app, transfer_id, total_bytes, total_bytes, "success");
     Ok(())
+}
+
+fn copy_with_progress<R: Read, W: Write>(
+    app: &AppHandle,
+    transfer_id: &str,
+    reader: &mut R,
+    writer: &mut W,
+    total_bytes: u64,
+) -> Result<()> {
+    let mut buffer = [0_u8; TRANSFER_BUFFER_SIZE];
+    let mut transferred_bytes = 0_u64;
+
+    loop {
+        let read_size = reader.read(&mut buffer)?;
+        if read_size == 0 {
+            break;
+        }
+
+        writer.write_all(&buffer[..read_size])?;
+        transferred_bytes = transferred_bytes.saturating_add(read_size as u64);
+        emit_transfer_progress(app, transfer_id, transferred_bytes, total_bytes, "running");
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+fn emit_transfer_progress(
+    app: &AppHandle,
+    transfer_id: &str,
+    transferred_bytes: u64,
+    total_bytes: u64,
+    status: &str,
+) {
+    let percent = if total_bytes == 0 {
+        if status == "success" {
+            100.0
+        } else {
+            0.0
+        }
+    } else {
+        (transferred_bytes as f64 * 100.0 / total_bytes as f64).clamp(0.0, 100.0)
+    };
+
+    let _ = app.emit(
+        TRANSFER_PROGRESS_EVENT,
+        SftpTransferProgressPayload {
+            transfer_id: transfer_id.to_string(),
+            transferred_bytes,
+            total_bytes,
+            percent,
+            status: status.to_string(),
+        },
+    );
 }
 
 fn inner_sftp_mkdir(state: &SftpState, connection_id: &str, path: &str) -> Result<()> {
