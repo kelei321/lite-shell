@@ -59,10 +59,6 @@
         </div>
 
         <section class="panel sftp-panel">
-          <header class="panel-head">
-            <div><span class="online-dot" :class="{ 'online-dot--muted': !workspaceStore.hasActiveHost }"></span><strong>SFTP 文件管理器</strong></div>
-            <div class="panel-actions"><span class="status-chip">{{ credentialLabel }}</span><span>{{ activeUserLabel }}</span></div>
-          </header>
           <div class="workspace-sftp"><SftpView /></div>
         </section>
       </section>
@@ -322,11 +318,7 @@ function clamp(value: number, min: number, max: number) {
 .workspace-sftp :deep(.content-grid) {
   height: 100%;
   grid-template-columns: minmax(0, 1fr);
-  padding: 8px;
-}
-
-.workspace-sftp :deep(.path-bar) {
-  padding: 8px;
+  padding: 6px;
 }
 
 .rail-brand {
