@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use ssh2::{Session, Sftp};
+use ssh2::{FileStat, Session, Sftp};
 use std::{
     collections::HashMap,
     fs::File,
@@ -38,13 +38,20 @@ pub struct SftpConnectPayload {
     passphrase: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteFileItem {
     name: String,
     path: String,
     is_dir: bool,
     size: u64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePathInput {
+    path: String,
+    is_dir: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -144,6 +151,15 @@ pub fn sftp_mkdir(
 }
 
 #[tauri::command]
+pub fn sftp_create_file(
+    state: State<SftpState>,
+    connection_id: String,
+    path: String,
+) -> Result<(), String> {
+    inner_sftp_create_file(&state, &connection_id, &path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn sftp_delete(
     state: State<SftpState>,
     connection_id: String,
@@ -151,6 +167,18 @@ pub fn sftp_delete(
     is_dir: bool,
 ) -> Result<(), String> {
     inner_sftp_delete(&state, &connection_id, &path, is_dir).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn sftp_delete_many(
+    app: AppHandle,
+    state: State<SftpState>,
+    connection_id: String,
+    items: Vec<RemotePathInput>,
+    transfer_id: String,
+) -> Result<(), String> {
+    inner_sftp_delete_many(&app, &state, &connection_id, &items, &transfer_id)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -162,6 +190,38 @@ pub fn sftp_rename(
 ) -> Result<(), String> {
     inner_sftp_rename(&state, &connection_id, &old_path, &new_path)
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn sftp_paste(
+    app: AppHandle,
+    state: State<SftpState>,
+    connection_id: String,
+    items: Vec<RemoteFileItem>,
+    target_path: String,
+    mode: String,
+    transfer_id: String,
+) -> Result<(), String> {
+    inner_sftp_paste(
+        &app,
+        &state,
+        &connection_id,
+        &items,
+        &target_path,
+        &mode,
+        &transfer_id,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn sftp_chmod(
+    state: State<SftpState>,
+    connection_id: String,
+    path: String,
+    mode: String,
+) -> Result<(), String> {
+    inner_sftp_chmod(&state, &connection_id, &path, &mode).map_err(|error| error.to_string())
 }
 
 fn inner_sftp_list_dir(
@@ -341,6 +401,17 @@ fn inner_sftp_mkdir(state: &SftpState, connection_id: &str, path: &str) -> Resul
     Ok(())
 }
 
+fn inner_sftp_create_file(state: &SftpState, connection_id: &str, path: &str) -> Result<()> {
+    let handle = get_sftp_handle(state, connection_id)?;
+    let sftp = handle.sftp.lock();
+    let mut file = sftp
+        .create(Path::new(path))
+        .with_context(|| format!("create remote file failed: {path}"))?;
+    file.flush()
+        .with_context(|| format!("flush remote file failed: {path}"))?;
+    Ok(())
+}
+
 fn inner_sftp_delete(
     state: &SftpState,
     connection_id: &str,
@@ -349,16 +420,62 @@ fn inner_sftp_delete(
 ) -> Result<()> {
     let handle = get_sftp_handle(state, connection_id)?;
     let sftp = handle.sftp.lock();
+    delete_remote_path(&sftp, path, is_dir)
+}
 
+fn inner_sftp_delete_many(
+    app: &AppHandle,
+    state: &SftpState,
+    connection_id: &str,
+    items: &[RemotePathInput],
+    transfer_id: &str,
+) -> Result<()> {
+    let handle = get_sftp_handle(state, connection_id)?;
+    let sftp = handle.sftp.lock();
+    let total = items.len() as u64;
+
+    emit_transfer_progress(app, transfer_id, 0, total, "running");
+    for (index, item) in items.iter().enumerate() {
+        if item.path == "/" {
+            return Err(anyhow!("refuse to delete remote root path"));
+        }
+        delete_remote_path(&sftp, &item.path, item.is_dir)
+            .with_context(|| format!("delete remote path failed: {}", item.path))?;
+        emit_transfer_progress(app, transfer_id, (index + 1) as u64, total, "running");
+    }
+    emit_transfer_progress(app, transfer_id, total, total, "success");
+    Ok(())
+}
+
+fn delete_remote_path(sftp: &Sftp, path: &str, is_dir: bool) -> Result<()> {
     if is_dir {
-        sftp.rmdir(Path::new(path))
-            .with_context(|| format!("delete remote directory failed: {path}"))?;
+        delete_remote_dir_recursive(sftp, path)
     } else {
         sftp.unlink(Path::new(path))
-            .with_context(|| format!("delete remote file failed: {path}"))?;
+            .with_context(|| format!("delete remote file failed: {path}"))
+    }
+}
+
+fn delete_remote_dir_recursive(sftp: &Sftp, path: &str) -> Result<()> {
+    let entries = sftp
+        .readdir(Path::new(path))
+        .with_context(|| format!("read remote dir before delete failed: {path}"))?;
+
+    for (entry_path, stat) in entries {
+        let name = entry_path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if name.is_empty() || name == "." || name == ".." {
+            continue;
+        }
+
+        let child_path = join_remote_path(path, &name);
+        delete_remote_path(sftp, &child_path, stat.is_dir())?;
     }
 
-    Ok(())
+    sftp.rmdir(Path::new(path))
+        .with_context(|| format!("delete remote directory failed: {path}"))
 }
 
 fn inner_sftp_rename(
@@ -371,6 +488,111 @@ fn inner_sftp_rename(
     let sftp = handle.sftp.lock();
     sftp.rename(Path::new(old_path), Path::new(new_path), None)
         .with_context(|| format!("rename remote path failed: {old_path} -> {new_path}"))?;
+    Ok(())
+}
+
+fn inner_sftp_paste(
+    app: &AppHandle,
+    state: &SftpState,
+    connection_id: &str,
+    items: &[RemoteFileItem],
+    target_path: &str,
+    mode: &str,
+    transfer_id: &str,
+) -> Result<()> {
+    let handle = get_sftp_handle(state, connection_id)?;
+    let sftp = handle.sftp.lock();
+    let total = items.len() as u64;
+
+    emit_transfer_progress(app, transfer_id, 0, total, "running");
+    for (index, item) in items.iter().enumerate() {
+        let destination = join_remote_path(target_path, &item.name);
+        if item.path == destination {
+            return Err(anyhow!("source and target are the same: {}", item.path));
+        }
+
+        match mode {
+            "cut" => sftp
+                .rename(Path::new(&item.path), Path::new(&destination), None)
+                .with_context(|| format!("move remote path failed: {} -> {destination}", item.path))?,
+            _ => copy_remote_path(&sftp, &item.path, &destination, item.is_dir)
+                .with_context(|| format!("copy remote path failed: {} -> {destination}", item.path))?,
+        }
+        emit_transfer_progress(app, transfer_id, (index + 1) as u64, total, "running");
+    }
+    emit_transfer_progress(app, transfer_id, total, total, "success");
+    Ok(())
+}
+
+fn copy_remote_path(sftp: &Sftp, source: &str, target: &str, is_dir: bool) -> Result<()> {
+    if is_dir {
+        copy_remote_dir_recursive(sftp, source, target)
+    } else {
+        copy_remote_file(sftp, source, target)
+    }
+}
+
+fn copy_remote_file(sftp: &Sftp, source: &str, target: &str) -> Result<()> {
+    let mut source_file = sftp
+        .open(Path::new(source))
+        .with_context(|| format!("open remote source file failed: {source}"))?;
+    let mut target_file = sftp
+        .create(Path::new(target))
+        .with_context(|| format!("create remote target file failed: {target}"))?;
+    std::io::copy(&mut source_file, &mut target_file)
+        .with_context(|| format!("copy remote file failed: {source} -> {target}"))?;
+    target_file
+        .flush()
+        .with_context(|| format!("flush remote target file failed: {target}"))?;
+    Ok(())
+}
+
+fn copy_remote_dir_recursive(sftp: &Sftp, source: &str, target: &str) -> Result<()> {
+    sftp.mkdir(Path::new(target), 0o755)
+        .with_context(|| format!("create remote target directory failed: {target}"))?;
+    let entries = sftp
+        .readdir(Path::new(source))
+        .with_context(|| format!("read remote source directory failed: {source}"))?;
+
+    for (entry_path, stat) in entries {
+        let name = entry_path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if name.is_empty() || name == "." || name == ".." {
+            continue;
+        }
+
+        let source_child = join_remote_path(source, &name);
+        let target_child = join_remote_path(target, &name);
+        copy_remote_path(sftp, &source_child, &target_child, stat.is_dir())?;
+    }
+
+    Ok(())
+}
+
+fn inner_sftp_chmod(
+    state: &SftpState,
+    connection_id: &str,
+    path: &str,
+    mode: &str,
+) -> Result<()> {
+    let permissions = u32::from_str_radix(mode.trim(), 8)
+        .with_context(|| format!("invalid chmod mode: {mode}"))?;
+    let handle = get_sftp_handle(state, connection_id)?;
+    let sftp = handle.sftp.lock();
+    sftp.setstat(
+        Path::new(path),
+        FileStat {
+            size: None,
+            uid: None,
+            gid: None,
+            perm: Some(permissions),
+            atime: None,
+            mtime: None,
+        },
+    )
+    .with_context(|| format!("chmod remote path failed: {path}"))?;
     Ok(())
 }
 
