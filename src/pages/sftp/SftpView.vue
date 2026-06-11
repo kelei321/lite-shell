@@ -20,25 +20,25 @@
           <div class="sftp-path-main" :title="currentPath">{{ currentPath }}</div>
           <div class="sftp-icon-actions" aria-label="SFTP 操作">
             <button class="sftp-icon-button" :disabled="!canBrowse || currentPath === '/'" title="上级" type="button" aria-label="上级" @click="goParent">
-              ↰
+              ↖
             </button>
             <button class="sftp-icon-button" :disabled="!canRunConnectedAction" title="上传" type="button" aria-label="上传" @click="uploadFile">
-              ⬆
+              ↑
             </button>
             <button class="sftp-icon-button" :disabled="!canDownload" title="下载" type="button" aria-label="下载" @click="downloadFile">
-              ⬇
+              ↓
             </button>
             <button class="sftp-icon-button" :disabled="!canRunConnectedAction" title="新建目录" type="button" aria-label="新建目录" @click="createDirectory">
-              📁+
+              ⊞
             </button>
             <button class="sftp-icon-button" :disabled="!canRunSelectedAction" title="重命名" type="button" aria-label="重命名" @click="renameItem">
               ✎
             </button>
             <button class="sftp-icon-button sftp-icon-button--danger" :disabled="!canRunSelectedAction" title="删除" type="button" aria-label="删除" @click="deleteItem">
-              🗑
+              ⌫
             </button>
             <button class="sftp-icon-button" :disabled="autoConnecting || loading || actionLoading" title="刷新" type="button" aria-label="刷新" @click="refresh">
-              ↻
+              ⟳
             </button>
           </div>
           <span v-if="actionLoading" class="action-message">{{ actionStatusText }}</span>
@@ -897,7 +897,7 @@ function formatSize(size: number) {
 .sftp-toolbar-row {
   display: grid;
   align-items: center;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, auto);
+  grid-template-columns: minmax(180px, 420px) auto minmax(0, 1fr);
   gap: 8px;
   border-bottom: 1px solid var(--ls-border);
   background: linear-gradient(180deg, var(--ls-panel-strong), var(--ls-panel-soft));
@@ -906,6 +906,8 @@ function formatSize(size: number) {
 
 .sftp-path-main {
   min-width: 0;
+  width: 100%;
+  max-width: 420px;
   height: 28px;
   overflow: hidden;
   border: 1px solid var(--ls-border);
@@ -931,14 +933,19 @@ function formatSize(size: number) {
   width: 28px;
   height: 28px;
   place-items: center;
+  overflow: hidden;
   border: 1px solid var(--ls-border-strong);
   border-radius: 8px;
   background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-strong));
   color: var(--ls-text);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 1px 1px rgba(16, 24, 40, 0.06);
   cursor: pointer;
-  font-size: 13px;
+  font-family: "Segoe UI Symbol", "Arial Unicode MS", Arial, sans-serif;
+  font-size: 15px;
+  font-weight: 700;
   line-height: 1;
+  padding: 0;
+  text-align: center;
   white-space: nowrap;
 }
 
