@@ -24,8 +24,12 @@ fn main() {
             sftp::sftp_download_file,
             sftp::sftp_upload_file,
             sftp::sftp_mkdir,
+            sftp::sftp_create_file,
             sftp::sftp_delete,
+            sftp::sftp_delete_many,
             sftp::sftp_rename,
+            sftp::sftp_paste,
+            sftp::sftp_chmod,
             monitor::monitor_snapshot,
         ])
         .run(tauri::generate_context!())
