@@ -8,7 +8,12 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
 };
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
@@ -16,15 +21,23 @@ use uuid::Uuid;
 const TRANSFER_PROGRESS_EVENT: &str = "sftp-transfer-progress";
 const TRANSFER_BUFFER_SIZE: usize = 64 * 1024;
 const TRANSFER_PROGRESS_STEP_BYTES: u64 = 512 * 1024;
+const TRANSFER_PAUSE_POLL_MS: u64 = 120;
 
 #[derive(Default)]
 pub struct SftpState {
     sessions: Mutex<HashMap<String, Arc<SftpHandle>>>,
+    transfer_controls: Mutex<HashMap<String, Arc<TransferControl>>>,
 }
 
 pub struct SftpHandle {
     _session: Session,
     sftp: Mutex<Sftp>,
+}
+
+#[derive(Default)]
+struct TransferControl {
+    paused: AtomicBool,
+    cancelled: AtomicBool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +137,31 @@ pub fn sftp_close(state: State<SftpState>, connection_id: String) -> Result<(), 
 }
 
 #[tauri::command]
+pub fn sftp_pause_transfer(state: State<SftpState>, transfer_id: String) -> Result<(), String> {
+    if let Some(control) = state.transfer_controls.lock().get(&transfer_id) {
+        control.paused.store(true, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn sftp_resume_transfer(state: State<SftpState>, transfer_id: String) -> Result<(), String> {
+    if let Some(control) = state.transfer_controls.lock().get(&transfer_id) {
+        control.paused.store(false, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn sftp_cancel_transfer(state: State<SftpState>, transfer_id: String) -> Result<(), String> {
+    if let Some(control) = state.transfer_controls.lock().get(&transfer_id) {
+        control.cancelled.store(true, Ordering::SeqCst);
+        control.paused.store(false, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn sftp_download_file(
     app: AppHandle,
     state: State<SftpState>,
@@ -132,15 +170,18 @@ pub fn sftp_download_file(
     local_path: String,
     transfer_id: String,
 ) -> Result<(), String> {
-    inner_sftp_download_file(
+    let control = register_transfer_control(&state, &transfer_id);
+    let result = inner_sftp_download_file(
         &app,
         &state,
         &connection_id,
         &remote_path,
         &local_path,
         &transfer_id,
-    )
-    .map_err(|error| error.to_string())
+        &control,
+    );
+    finish_transfer_control(&state, &transfer_id);
+    result.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -152,15 +193,18 @@ pub fn sftp_download_dir(
     local_dir: String,
     transfer_id: String,
 ) -> Result<(), String> {
-    inner_sftp_download_dir(
+    let control = register_transfer_control(&state, &transfer_id);
+    let result = inner_sftp_download_dir(
         &app,
         &state,
         &connection_id,
         &remote_path,
         &local_dir,
         &transfer_id,
-    )
-    .map_err(|error| error.to_string())
+        &control,
+    );
+    finish_transfer_control(&state, &transfer_id);
+    result.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -172,15 +216,18 @@ pub fn sftp_upload_file(
     remote_path: String,
     transfer_id: String,
 ) -> Result<(), String> {
-    inner_sftp_upload_file(
+    let control = register_transfer_control(&state, &transfer_id);
+    let result = inner_sftp_upload_file(
         &app,
         &state,
         &connection_id,
         &local_path,
         &remote_path,
         &transfer_id,
-    )
-    .map_err(|error| error.to_string())
+        &control,
+    );
+    finish_transfer_control(&state, &transfer_id);
+    result.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -192,15 +239,18 @@ pub fn sftp_upload_dir(
     remote_path: String,
     transfer_id: String,
 ) -> Result<(), String> {
-    inner_sftp_upload_dir(
+    let control = register_transfer_control(&state, &transfer_id);
+    let result = inner_sftp_upload_dir(
         &app,
         &state,
         &connection_id,
         &local_path,
         &remote_path,
         &transfer_id,
-    )
-    .map_err(|error| error.to_string())
+        &control,
+    );
+    finish_transfer_control(&state, &transfer_id);
+    result.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -239,8 +289,10 @@ pub fn sftp_delete_many(
     items: Vec<RemotePathInput>,
     transfer_id: String,
 ) -> Result<(), String> {
-    inner_sftp_delete_many(&app, &state, &connection_id, &items, &transfer_id)
-        .map_err(|error| error.to_string())
+    let control = register_transfer_control(&state, &transfer_id);
+    let result = inner_sftp_delete_many(&app, &state, &connection_id, &items, &transfer_id, &control);
+    finish_transfer_control(&state, &transfer_id);
+    result.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -264,7 +316,8 @@ pub fn sftp_paste(
     mode: String,
     transfer_id: String,
 ) -> Result<(), String> {
-    inner_sftp_paste(
+    let control = register_transfer_control(&state, &transfer_id);
+    let result = inner_sftp_paste(
         &app,
         &state,
         &connection_id,
@@ -272,8 +325,10 @@ pub fn sftp_paste(
         &target_path,
         &mode,
         &transfer_id,
-    )
-    .map_err(|error| error.to_string())
+        &control,
+    );
+    finish_transfer_control(&state, &transfer_id);
+    result.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -358,6 +413,7 @@ fn inner_sftp_download_file(
     remote_path: &str,
     local_path: &str,
     transfer_id: &str,
+    control: &Arc<TransferControl>,
 ) -> Result<()> {
     let handle = get_sftp_handle(state, connection_id)?;
     let sftp = handle.sftp.lock();
@@ -379,6 +435,7 @@ fn inner_sftp_download_file(
         &mut remote_file,
         &mut local_file,
         total_bytes,
+        control,
     )
     .with_context(|| format!("copy remote file to local failed: {remote_path} -> {local_path}"))?;
     emit_transfer_progress(app, transfer_id, total_bytes, total_bytes, "success");
@@ -392,6 +449,7 @@ fn inner_sftp_download_dir(
     remote_path: &str,
     local_dir: &str,
     transfer_id: &str,
+    control: &Arc<TransferControl>,
 ) -> Result<()> {
     let handle = get_sftp_handle(state, connection_id)?;
     let sftp = handle.sftp.lock();
@@ -410,6 +468,7 @@ fn inner_sftp_download_dir(
         &local_root,
         &mut transferred_bytes,
         total_bytes,
+        control,
     )?;
     emit_transfer_progress(app, transfer_id, total_bytes, total_bytes, "success");
     Ok(())
@@ -422,6 +481,7 @@ fn inner_sftp_upload_file(
     local_path: &str,
     remote_path: &str,
     transfer_id: &str,
+    control: &Arc<TransferControl>,
 ) -> Result<()> {
     let handle = get_sftp_handle(state, connection_id)?;
     let mut local_file =
@@ -442,6 +502,7 @@ fn inner_sftp_upload_file(
         &mut local_file,
         &mut remote_file,
         total_bytes,
+        control,
     )
     .with_context(|| format!("copy local file to remote failed: {local_path} -> {remote_path}"))?;
     emit_transfer_progress(app, transfer_id, total_bytes, total_bytes, "success");
@@ -455,6 +516,7 @@ fn inner_sftp_upload_dir(
     local_path: &str,
     remote_path: &str,
     transfer_id: &str,
+    control: &Arc<TransferControl>,
 ) -> Result<()> {
     let handle = get_sftp_handle(state, connection_id)?;
     let sftp = handle.sftp.lock();
@@ -471,6 +533,7 @@ fn inner_sftp_upload_dir(
         remote_path,
         &mut transferred_bytes,
         total_bytes,
+        control,
     )?;
     emit_transfer_progress(app, transfer_id, total_bytes, total_bytes, "success");
     Ok(())
@@ -482,6 +545,7 @@ fn copy_with_progress<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     total_bytes: u64,
+    control: &Arc<TransferControl>,
 ) -> Result<()> {
     let mut transferred_bytes = 0_u64;
     copy_with_progress_accum(
@@ -491,6 +555,7 @@ fn copy_with_progress<R: Read, W: Write>(
         writer,
         &mut transferred_bytes,
         total_bytes,
+        control,
     )
 }
 
@@ -501,11 +566,13 @@ fn copy_with_progress_accum<R: Read, W: Write>(
     writer: &mut W,
     transferred_bytes: &mut u64,
     total_bytes: u64,
+    control: &Arc<TransferControl>,
 ) -> Result<()> {
     let mut buffer = [0_u8; TRANSFER_BUFFER_SIZE];
     let mut last_emitted_bytes = *transferred_bytes;
 
     loop {
+        check_transfer_control(app, transfer_id, control, *transferred_bytes, total_bytes)?;
         let read_size = reader.read(&mut buffer)?;
         if read_size == 0 {
             break;
@@ -591,6 +658,7 @@ fn inner_sftp_delete_many(
     connection_id: &str,
     items: &[RemotePathInput],
     transfer_id: &str,
+    control: &Arc<TransferControl>,
 ) -> Result<()> {
     let handle = get_sftp_handle(state, connection_id)?;
     let sftp = handle.sftp.lock();
@@ -598,6 +666,7 @@ fn inner_sftp_delete_many(
 
     emit_transfer_progress(app, transfer_id, 0, total, "running");
     for (index, item) in items.iter().enumerate() {
+        check_transfer_control(app, transfer_id, control, index as u64, total)?;
         if item.path == "/" {
             return Err(anyhow!("refuse to delete remote root path"));
         }
@@ -661,6 +730,7 @@ fn inner_sftp_paste(
     target_path: &str,
     mode: &str,
     transfer_id: &str,
+    control: &Arc<TransferControl>,
 ) -> Result<()> {
     let handle = get_sftp_handle(state, connection_id)?;
     let sftp = handle.sftp.lock();
@@ -668,6 +738,7 @@ fn inner_sftp_paste(
 
     emit_transfer_progress(app, transfer_id, 0, total, "running");
     for (index, item) in items.iter().enumerate() {
+        check_transfer_control(app, transfer_id, control, index as u64, total)?;
         let destination = join_remote_path(target_path, &item.name);
         if item.path == destination {
             return Err(anyhow!("source and target are the same: {}", item.path));
@@ -809,6 +880,7 @@ fn download_remote_dir_recursive(
     local_path: &Path,
     transferred_bytes: &mut u64,
     total_bytes: u64,
+    control: &Arc<TransferControl>,
 ) -> Result<()> {
     fs::create_dir_all(local_path)
         .with_context(|| format!("create local directory failed: {}", local_path.display()))?;
@@ -818,6 +890,7 @@ fn download_remote_dir_recursive(
         .with_context(|| format!("read remote dir failed: {remote_path}"))?;
 
     for (entry_path, stat) in entries {
+        check_transfer_control(app, transfer_id, control, *transferred_bytes, total_bytes)?;
         let name = entry_path
             .file_name()
             .map(|value| value.to_string_lossy().to_string())
@@ -837,6 +910,7 @@ fn download_remote_dir_recursive(
                 &child_local_path,
                 transferred_bytes,
                 total_bytes,
+                control,
             )?;
         } else {
             let mut remote_file = sftp
@@ -852,6 +926,7 @@ fn download_remote_dir_recursive(
                 &mut local_file,
                 transferred_bytes,
                 total_bytes,
+                control,
             )?;
         }
     }
@@ -867,7 +942,9 @@ fn upload_local_path_recursive(
     remote_path: &str,
     transferred_bytes: &mut u64,
     total_bytes: u64,
+    control: &Arc<TransferControl>,
 ) -> Result<()> {
+    check_transfer_control(app, transfer_id, control, *transferred_bytes, total_bytes)?;
     let metadata = fs::metadata(local_path)
         .with_context(|| format!("read local metadata failed: {}", local_path.display()))?;
 
@@ -884,6 +961,7 @@ fn upload_local_path_recursive(
             &mut remote_file,
             transferred_bytes,
             total_bytes,
+            control,
         )?;
         return Ok(());
     }
@@ -892,6 +970,7 @@ fn upload_local_path_recursive(
     for entry in fs::read_dir(local_path)
         .with_context(|| format!("read local directory failed: {}", local_path.display()))?
     {
+        check_transfer_control(app, transfer_id, control, *transferred_bytes, total_bytes)?;
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
         let child_local_path = entry.path();
@@ -904,6 +983,7 @@ fn upload_local_path_recursive(
             &child_remote_path,
             transferred_bytes,
             total_bytes,
+            control,
         )?;
     }
 
@@ -917,6 +997,46 @@ fn ensure_remote_dir(sftp: &Sftp, path: &str) -> Result<()> {
 
     sftp.mkdir(Path::new(path), 0o755)
         .with_context(|| format!("create remote directory failed: {path}"))?;
+    Ok(())
+}
+
+fn register_transfer_control(state: &SftpState, transfer_id: &str) -> Arc<TransferControl> {
+    let control = Arc::new(TransferControl::default());
+    state
+        .transfer_controls
+        .lock()
+        .insert(transfer_id.to_string(), control.clone());
+    control
+}
+
+fn finish_transfer_control(state: &SftpState, transfer_id: &str) {
+    state.transfer_controls.lock().remove(transfer_id);
+}
+
+fn check_transfer_control(
+    app: &AppHandle,
+    transfer_id: &str,
+    control: &Arc<TransferControl>,
+    transferred_bytes: u64,
+    total_bytes: u64,
+) -> Result<()> {
+    if control.cancelled.load(Ordering::SeqCst) {
+        emit_transfer_progress(app, transfer_id, transferred_bytes, total_bytes, "cancelled");
+        return Err(anyhow!("transfer cancelled"));
+    }
+
+    if control.paused.load(Ordering::SeqCst) {
+        emit_transfer_progress(app, transfer_id, transferred_bytes, total_bytes, "paused");
+        while control.paused.load(Ordering::SeqCst) {
+            if control.cancelled.load(Ordering::SeqCst) {
+                emit_transfer_progress(app, transfer_id, transferred_bytes, total_bytes, "cancelled");
+                return Err(anyhow!("transfer cancelled"));
+            }
+            thread::sleep(Duration::from_millis(TRANSFER_PAUSE_POLL_MS));
+        }
+        emit_transfer_progress(app, transfer_id, transferred_bytes, total_bytes, "running");
+    }
+
     Ok(())
 }
 
