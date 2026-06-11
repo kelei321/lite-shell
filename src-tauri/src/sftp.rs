@@ -738,7 +738,7 @@ fn inner_sftp_chmod(
     path: &str,
     mode: &str,
 ) -> Result<()> {
-    let permissions = u32::from_str_radix(mode.trim(), 8)
+    let permissions = i32::from_str_radix(mode.trim(), 8)
         .with_context(|| format!("invalid chmod mode: {mode}"))?;
     let handle = get_sftp_handle(state, connection_id)?;
     let sftp = handle.sftp.lock();
@@ -976,7 +976,7 @@ fn remote_name(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-fn format_permissions(perm: Option<u32>) -> String {
+fn format_permissions(perm: Option<i32>) -> String {
     perm.map(|value| format!("{:o}", value & 0o7777))
         .unwrap_or_else(|| "-".to_string())
 }
