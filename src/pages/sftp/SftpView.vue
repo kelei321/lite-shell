@@ -111,7 +111,12 @@
             <span>{{ task.totalBytes ? formatSize(task.totalBytes) : '-' }}</span>
             <span class="transfer-progress-cell"><i :class="`transfer-progress__bar transfer-progress__bar--${task.status}`" :style="{ width: progressWidth(task.percent) }"></i><b>{{ formatPercent(task.percent) }}</b></span>
             <span :class="`transfer-status transfer-status--${task.status}`">{{ transferStatusText(task.status) }}</span>
-            <span class="transfer-row-actions"><button v-if="task.status === 'failed'" type="button" @click="retryTransfer(task)">重试</button><button type="button" @click="cancelTransfer(task)">×</button></span>
+            <span class="transfer-row-actions">
+              <button v-if="task.status === 'running'" type="button" @click="pauseTransfer(task)">暂停</button>
+              <button v-else-if="task.status === 'paused'" type="button" @click="resumeTransfer(task)">继续</button>
+              <button v-if="isCancellableTransfer(task)" type="button" @click="cancelTransfer(task)">取消</button>
+              <button v-else type="button" @click="removeTransferTask(task)">×</button>
+            </span>
           </div>
         </div>
       </section>
@@ -197,7 +202,7 @@ interface RemoteFileItem { name: string; path: string; isDir: boolean; size: num
 interface RemoteFileStat extends RemoteFileItem { permissions: string; uid?: number; gid?: number; modifiedAt?: number; }
 interface SftpSessionState { hostId: string; connectionId: string; currentPath: string; files: RemoteFileItem[]; loading: boolean; connecting: boolean; errorMessage: string; }
 interface SftpTransferProgressPayload { transferId: string; transferredBytes: number; totalBytes: number; percent: number; status: TransferStatus; }
-type TransferStatus = 'queued' | 'running' | 'success' | 'failed' | 'cancelled';
+type TransferStatus = 'queued' | 'running' | 'paused' | 'success' | 'failed' | 'cancelled';
 type TransferType = 'upload' | 'download' | 'copy' | 'delete';
 type ClipboardMode = 'copy' | 'cut';
 type CreateEntryKind = 'file' | 'dir';
@@ -552,8 +557,8 @@ async function pasteClipboard() {
     if (clipboard.value.mode === 'cut') clearClipboard();
     await loadDir(snapshot.currentPath, snapshot.hostId);
   } catch {
-    markTransferFailed(taskId);
-    actionMessage.value = '粘贴失败，请检查远程权限或目标路径。';
+    if (!isTransferCancelled(taskId)) markTransferFailed(taskId);
+    actionMessage.value = isTransferCancelled(taskId) ? '粘贴已取消。' : '粘贴失败，请检查远程权限或目标路径。';
   }
 }
 
@@ -623,11 +628,12 @@ async function uploadOneDroppedPath(snapshot: ActiveSessionSnapshot, localPath: 
   try {
     await invoke('sftp_upload_file', { connectionId: snapshot.connectionId, localPath, remotePath, transferId });
   } catch {
+    if (isTransferCancelled(transferId)) return;
     try {
       await invoke('sftp_upload_dir', { connectionId: snapshot.connectionId, localPath, remotePath, transferId });
     } catch {
-      markTransferFailed(transferId);
-      actionMessage.value = `拖拽上传失败：${name}`;
+      if (!isTransferCancelled(transferId)) markTransferFailed(transferId);
+      actionMessage.value = isTransferCancelled(transferId) ? `拖拽上传已取消：${name}` : `拖拽上传失败：${name}`;
     }
   }
 }
@@ -684,8 +690,8 @@ async function confirmDeleteSelected() {
     clearSelection();
     await loadDir(snapshot.currentPath, snapshot.hostId);
   } catch {
-    markTransferFailed(transferId);
-    actionMessage.value = '删除失败，请检查远程权限。';
+    if (!isTransferCancelled(transferId)) markTransferFailed(transferId);
+    actionMessage.value = isTransferCancelled(transferId) ? '删除已取消。' : '删除失败，请检查远程权限。';
   } finally {
     closeDeleteDialog();
   }
@@ -748,10 +754,10 @@ async function runSftpAction(options: { snapshot: ActiveSessionSnapshot; loading
     if (activeHost.value?.id !== options.snapshot.hostId) return;
     actionMessage.value = options.successText;
   } catch {
-    if (options.transferId) markTransferFailed(options.transferId);
+    if (options.transferId && !isTransferCancelled(options.transferId)) markTransferFailed(options.transferId);
     const latest = sessionsByHostId.value[options.snapshot.hostId];
     if (!latest || latest.connectionId !== options.snapshot.connectionId || activeHost.value?.id !== options.snapshot.hostId) return;
-    actionMessage.value = options.failureText;
+    actionMessage.value = options.transferId && isTransferCancelled(options.transferId) ? '传输已取消。' : options.failureText;
   } finally {
     actionLoading.value = false;
     actionStatusText.value = '';
@@ -763,12 +769,17 @@ function createTransferTask(type: TransferType, name: string, targetPath: string
   transferTasks.value = [{ id, type, name, targetPath, transferredBytes: 0, totalBytes, percent: 0, status: 'running', createdAt: Date.now() }, ...transferTasks.value].slice(0, 16);
   return id;
 }
+function updateTransferStatus(transferId: string, status: TransferStatus) { transferTasks.value = transferTasks.value.map((task) => task.id === transferId ? { ...task, status } : task); }
+function isTransferCancelled(transferId: string) { return transferTasks.value.some((task) => task.id === transferId && task.status === 'cancelled'); }
 function markTransferFailed(transferId: string) { transferTasks.value = transferTasks.value.map((task) => task.id === transferId ? { ...task, status: 'failed' } : task); }
-function pauseAllTransfers() { transferTasks.value = transferTasks.value.map((task) => task.status === 'running' ? { ...task, status: 'cancelled' } : task); }
-function clearFinishedTransfers() { transferTasks.value = transferTasks.value.filter((task) => task.status === 'running' || task.status === 'queued'); }
-function retryTransfer(task: TransferTask) { transferTasks.value = transferTasks.value.map((item) => item.id === task.id ? { ...item, status: 'queued', percent: 0, transferredBytes: 0 } : item); }
-function cancelTransfer(task: TransferTask) { transferTasks.value = transferTasks.value.map((item) => item.id === task.id ? { ...item, status: 'cancelled' } : item); }
-function transferStatusText(status: TransferStatus) { if (status === 'success') return '已完成'; if (status === 'failed') return '失败'; if (status === 'cancelled') return '已取消'; if (status === 'queued') return '等待中'; return '传输中'; }
+async function pauseAllTransfers() { await Promise.all(transferTasks.value.filter((task) => task.status === 'running').map((task) => pauseTransfer(task))); }
+async function pauseTransfer(task: TransferTask) { if (task.status !== 'running') return; await invoke('sftp_pause_transfer', { transferId: task.id }); updateTransferStatus(task.id, 'paused'); }
+async function resumeTransfer(task: TransferTask) { if (task.status !== 'paused') return; await invoke('sftp_resume_transfer', { transferId: task.id }); updateTransferStatus(task.id, 'running'); }
+async function cancelTransfer(task: TransferTask) { if (!isCancellableTransfer(task)) return; await invoke('sftp_cancel_transfer', { transferId: task.id }); updateTransferStatus(task.id, 'cancelled'); }
+function removeTransferTask(task: TransferTask) { transferTasks.value = transferTasks.value.filter((item) => item.id !== task.id); }
+function isCancellableTransfer(task: TransferTask) { return task.status === 'running' || task.status === 'paused' || task.status === 'queued'; }
+function clearFinishedTransfers() { transferTasks.value = transferTasks.value.filter((task) => task.status === 'running' || task.status === 'paused' || task.status === 'queued'); }
+function transferStatusText(status: TransferStatus) { if (status === 'success') return '已完成'; if (status === 'failed') return '失败'; if (status === 'cancelled') return '已取消'; if (status === 'paused') return '已暂停'; if (status === 'queued') return '等待中'; return '传输中'; }
 function transferTypeText(type: TransferType) { if (type === 'upload') return '上传'; if (type === 'download') return '下载'; if (type === 'copy') return '复制'; return '删除'; }
 function showDropOverlay() { if (canRunConnectedAction.value) isDropActive.value = true; }
 function hideDropOverlay(event: DragEvent) { if (event.currentTarget === event.target) isDropActive.value = false; }
@@ -845,9 +856,11 @@ function formatSize(size: number) { if (size < 1024) return `${size} B`; if (siz
 .transfer-progress__bar--success { background: var(--ls-success) !important; }
 .transfer-progress__bar--failed { background: var(--ls-danger) !important; }
 .transfer-progress__bar--cancelled { background: var(--ls-border-strong) !important; }
+.transfer-progress__bar--paused { background: var(--ls-warning) !important; }
 .transfer-status--success { color: var(--ls-success); }
 .transfer-status--failed { color: var(--ls-danger); }
 .transfer-status--running { color: var(--ls-primary); }
+.transfer-status--paused { color: var(--ls-warning); }
 .transfer-row-actions { display: inline-flex; gap: 4px; }
 .sftp-modal-mask { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; background: rgba(15, 23, 42, 0.28); backdrop-filter: blur(3px); }
 .sftp-modal { display: grid; gap: 14px; border: 1px solid var(--ls-border); border-radius: 12px; background: var(--ls-panel); box-shadow: var(--ls-shadow-lg); color: var(--ls-text); padding: 14px; }
