@@ -20,6 +20,7 @@ fn main() {
             ssh::ssh_close,
             sftp::sftp_connect,
             sftp::sftp_list_dir,
+            sftp::sftp_stat,
             sftp::sftp_close,
             sftp::sftp_download_file,
             sftp::sftp_upload_file,
