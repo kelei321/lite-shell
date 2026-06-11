@@ -23,7 +23,8 @@
           <div class="sftp-path-main" :title="currentPath">{{ currentPath }}</div>
           <div class="sftp-icon-actions" aria-label="SFTP 操作">
             <button class="sftp-icon-button" :disabled="!canBrowse || currentPath === '/'" title="上级" type="button" aria-label="上级" @click="goParent">↖</button>
-            <button class="sftp-icon-button" :disabled="!canRunConnectedAction" title="上传" type="button" aria-label="上传" @click="uploadFile">↑</button>
+            <button class="sftp-icon-button" :disabled="!canRunConnectedAction" title="上传文件" type="button" aria-label="上传文件" @click="uploadFile">↑</button>
+            <button class="sftp-icon-button" :disabled="!canRunConnectedAction" title="上传文件夹" type="button" aria-label="上传文件夹" @click="uploadDirectory">⇈</button>
             <button class="sftp-icon-button" :disabled="!canDownloadSelected" title="下载" type="button" aria-label="下载" @click="downloadSelected">↓</button>
             <button class="sftp-icon-button" :disabled="!canRunConnectedAction" title="新建文件" type="button" aria-label="新建文件" @click="openCreateDialog('file')">□</button>
             <button class="sftp-icon-button" :disabled="!canRunConnectedAction" title="新建文件夹" type="button" aria-label="新建文件夹" @click="openCreateDialog('dir')">⊞</button>
@@ -126,7 +127,8 @@
         <ul v-if="contextMenu.visible" class="context-menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }">
           <li><button :disabled="!canOpenSelected" type="button" @click="runMenuAction(openSelected)">打开</button></li>
           <li><button :disabled="!canDownloadSelected" type="button" @click="runMenuAction(downloadSelected)">下载</button></li>
-          <li><button :disabled="!canRunConnectedAction" type="button" @click="runMenuAction(uploadFile)">上传到当前目录</button></li>
+          <li><button :disabled="!canRunConnectedAction" type="button" @click="runMenuAction(uploadFile)">上传文件到当前目录</button></li>
+          <li><button :disabled="!canRunConnectedAction" type="button" @click="runMenuAction(uploadDirectory)">上传文件夹到当前目录</button></li>
           <li class="context-menu__separator"></li>
           <li><button :disabled="!canRunConnectedAction" type="button" @click="runMenuAction(() => openCreateDialog('file'))">新建文件</button></li>
           <li><button :disabled="!canRunConnectedAction" type="button" @click="runMenuAction(() => openCreateDialog('dir'))">新建文件夹</button></li>
@@ -296,7 +298,7 @@ const hasSelection = computed(() => selectedItems.value.length > 0);
 const canRename = computed(() => canRunConnectedAction.value && selectedItems.value.length === 1);
 const canShowProperties = computed(() => canRunConnectedAction.value && selectedItems.value.length === 1);
 const canOpenSelected = computed(() => canRunConnectedAction.value && selectedItems.value.length === 1);
-const canDownloadSelected = computed(() => canRunConnectedAction.value && selectedItems.value.some((item) => !item.isDir));
+const canDownloadSelected = computed(() => canRunConnectedAction.value && hasSelection.value);
 const canPaste = computed(() => Boolean(canRunConnectedAction.value && clipboard.value && clipboard.value.sourceHostId === activeHost.value?.id));
 const isAllSelected = computed(() => files.value.length > 0 && files.value.every((file) => selectedPaths.value.has(file.path)));
 const hasCompletedTransfer = computed(() => transferTasks.value.some((task) => task.status === 'success' || task.status === 'failed' || task.status === 'cancelled'));
@@ -707,6 +709,14 @@ async function uploadFile() {
   }
 }
 
+async function uploadDirectory() {
+  const snapshot = await ensureActiveSession();
+  if (!snapshot) return;
+  const localPath = await open({ directory: true, multiple: false });
+  if (!localPath || Array.isArray(localPath)) return;
+  await uploadOneDirectory(snapshot, localPath);
+}
+
 async function uploadOneFile(snapshot: { hostId: string; connectionId: string; currentPath: string }, localPath: string) {
   const fileName = getLocalFileName(localPath);
   if (!fileName) return;
@@ -715,17 +725,32 @@ async function uploadOneFile(snapshot: { hostId: string; connectionId: string; c
   await runSftpAction({ snapshot, loadingText: '正在上传...', successText: '上传完成。', failureText: '上传失败，请检查本地文件或远程目录权限。', transferId, action: () => invoke('sftp_upload_file', { connectionId: snapshot.connectionId, localPath, remotePath, transferId }) });
 }
 
+async function uploadOneDirectory(snapshot: { hostId: string; connectionId: string; currentPath: string }, localPath: string) {
+  const dirName = getLocalFileName(localPath);
+  if (!dirName) return;
+  const remotePath = joinRemotePath(snapshot.currentPath, dirName);
+  const transferId = createTransferTask('upload', dirName, snapshot.currentPath);
+  await runSftpAction({ snapshot, loadingText: '正在上传文件夹...', successText: '文件夹上传完成。', failureText: '文件夹上传失败，请检查本地目录或远程目录权限。', transferId, action: () => invoke('sftp_upload_dir', { connectionId: snapshot.connectionId, localPath, remotePath, transferId }) });
+}
+
 async function downloadSelected() {
-  const fileItems = selectedItems.value.filter((item) => !item.isDir);
-  if (!fileItems.length) return;
-  if (fileItems.length === 1) {
-    await downloadOneFile(fileItems[0]);
+  const items = selectedItems.value;
+  if (!items.length) return;
+
+  if (items.length === 1 && !items[0].isDir) {
+    await downloadOneFile(items[0]);
     return;
   }
+
   const targetDir = await open({ directory: true, multiple: false });
   if (!targetDir || Array.isArray(targetDir)) return;
-  for (const item of fileItems) {
-    await downloadOneFile(item, joinLocalPath(targetDir, item.name));
+
+  for (const item of items) {
+    if (item.isDir) {
+      await downloadOneDirectory(item, targetDir);
+    } else {
+      await downloadOneFile(item, joinLocalPath(targetDir, item.name));
+    }
   }
 }
 
@@ -737,6 +762,14 @@ async function downloadOneFile(item: RemoteFileItem, selectedLocalPath?: string)
   if (!localPath) return;
   const transferId = createTransferTask('download', item.name, localPath, item.size);
   await runSftpAction({ snapshot, loadingText: '正在下载...', successText: '下载完成。', failureText: '下载失败，请检查远程文件或本地保存路径。', transferId, action: () => invoke('sftp_download_file', { connectionId: snapshot.connectionId, remotePath: item.path, localPath, transferId }) });
+}
+
+async function downloadOneDirectory(item: RemoteFileItem, localDir: string) {
+  if (!item.isDir) return;
+  const snapshot = await ensureActiveSession();
+  if (!snapshot) return;
+  const transferId = createTransferTask('download', item.name, localDir);
+  await runSftpAction({ snapshot, loadingText: '正在下载文件夹...', successText: '文件夹下载完成。', failureText: '文件夹下载失败，请检查远程目录或本地保存路径。', transferId, action: () => invoke('sftp_download_dir', { connectionId: snapshot.connectionId, remotePath: item.path, localDir, transferId }) });
 }
 
 async function renameItem() {
