@@ -166,13 +166,17 @@
         <div v-if="propertiesDialog.visible && propertiesDialog.item" class="sftp-modal-mask" @click.self="closePropertiesDialog">
           <section class="sftp-modal sftp-modal--properties">
             <header><strong>文件属性</strong><button type="button" @click="closePropertiesDialog">×</button></header>
+            <p v-if="propertiesDialog.loading" class="compact-hint">正在读取远端属性...</p>
+            <p v-else-if="propertiesDialog.error" class="modal-error">{{ propertiesDialog.error }}</p>
             <dl class="properties-list">
-              <div><dt>名称</dt><dd>{{ propertiesDialog.item.name }}</dd></div>
-              <div><dt>路径</dt><dd>{{ propertiesDialog.item.path }}</dd></div>
-              <div><dt>类型</dt><dd>{{ propertiesDialog.item.isDir ? '文件夹' : '文件' }}</dd></div>
-              <div><dt>大小</dt><dd>{{ propertiesDialog.item.isDir ? '-' : formatSize(propertiesDialog.item.size) }}</dd></div>
-              <div><dt>权限</dt><dd>{{ chmodDialog.mode || '待读取' }}</dd></div>
-              <div><dt>是否目录</dt><dd>{{ propertiesDialog.item.isDir ? '是' : '否' }}</dd></div>
+              <div><dt>名称</dt><dd>{{ currentProperty.name }}</dd></div>
+              <div><dt>路径</dt><dd>{{ currentProperty.path }}</dd></div>
+              <div><dt>类型</dt><dd>{{ currentProperty.isDir ? '文件夹' : '文件' }}</dd></div>
+              <div><dt>大小</dt><dd>{{ currentProperty.isDir ? '-' : formatSize(currentProperty.size) }}</dd></div>
+              <div><dt>权限</dt><dd>{{ currentProperty.permissions || '待读取' }}</dd></div>
+              <div><dt>修改时间</dt><dd>{{ formatModifiedAt(currentProperty.modifiedAt) }}</dd></div>
+              <div><dt>所有者</dt><dd>{{ formatOwner(currentProperty) }}</dd></div>
+              <div><dt>是否目录</dt><dd>{{ currentProperty.isDir ? '是' : '否' }}</dd></div>
             </dl>
             <section class="chmod-box">
               <h4>权限设置</h4>
@@ -191,7 +195,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { type Event, listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { ask, open, save } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 
 import { type WorkspaceCredential, type WorkspaceHost, useWorkspaceStore } from '@/stores/workspace';
 
@@ -200,6 +204,13 @@ interface RemoteFileItem {
   path: string;
   isDir: boolean;
   size: number;
+}
+
+interface RemoteFileStat extends RemoteFileItem {
+  permissions: string;
+  uid?: number;
+  gid?: number;
+  modifiedAt?: number;
 }
 
 interface SftpSessionState {
@@ -258,7 +269,7 @@ const isTransferPanelExpanded = ref(true);
 const contextMenu = reactive({ visible: false, x: 0, y: 0 });
 const createDialog = reactive({ visible: false, kind: 'file' as CreateEntryKind, name: '', error: '' });
 const deleteDialog = reactive({ visible: false });
-const propertiesDialog = reactive({ visible: false, item: null as RemoteFileItem | null, mode: 'properties' as 'properties' | 'chmod' });
+const propertiesDialog = reactive({ visible: false, item: null as RemoteFileItem | null, stat: null as RemoteFileStat | null, loading: false, error: '', mode: 'properties' as 'properties' | 'chmod' });
 const chmodDialog = reactive({ mode: '755' });
 let disposed = false;
 let unlistenTransferProgress: UnlistenFn | undefined;
@@ -309,6 +320,10 @@ const statusNotice = computed(() => {
   if (loading.value) return '目录加载中...';
   if (connectionId.value) return `SFTP 已连接：${activeHostLabel.value}`;
   return '正在连接 SFTP...';
+});
+const currentProperty = computed<RemoteFileStat>(() => {
+  const fallback = propertiesDialog.item || { name: '-', path: '-', isDir: false, size: 0 };
+  return propertiesDialog.stat || { ...fallback, permissions: '', uid: undefined, gid: undefined, modifiedAt: undefined };
 });
 const selectionSummary = computed(() => {
   if (!selectedItems.value.length) return '未选择项目';
@@ -642,7 +657,7 @@ function clearClipboard() {
 async function pasteClipboard() {
   const snapshot = await ensureActiveSession();
   if (!snapshot || !clipboard.value) return;
-  const taskId = createTransferTask(clipboard.value.mode === 'copy' ? 'copy' : 'copy', `${clipboard.value.items.length} 项`, snapshot.currentPath);
+  const taskId = createTransferTask('copy', `${clipboard.value.items.length} 项`, snapshot.currentPath);
   try {
     await invoke('sftp_paste', { connectionId: snapshot.connectionId, items: clipboard.value.items, targetPath: snapshot.currentPath, mode: clipboard.value.mode, transferId: taskId });
     actionMessage.value = '粘贴完成。';
@@ -762,18 +777,41 @@ async function confirmDeleteSelected() {
   }
 }
 
-function openPropertiesDialog(mode: 'properties' | 'chmod') {
+async function openPropertiesDialog(mode: 'properties' | 'chmod') {
   const item = selectedItems.value[0];
-  if (!item) return;
+  const snapshot = await ensureActiveSession();
+  if (!item || !snapshot) return;
   propertiesDialog.visible = true;
   propertiesDialog.item = item;
+  propertiesDialog.stat = null;
   propertiesDialog.mode = mode;
+  propertiesDialog.loading = true;
+  propertiesDialog.error = '';
   chmodDialog.mode = item.isDir ? '755' : '644';
+
+  try {
+    const stat = await invoke<RemoteFileStat>('sftp_stat', { connectionId: snapshot.connectionId, path: item.path });
+    if (!propertiesDialog.visible || propertiesDialog.item?.path !== item.path) return;
+    propertiesDialog.stat = stat;
+    if (stat.permissions && stat.permissions !== '-') {
+      chmodDialog.mode = stat.permissions.slice(-4).replace(/^0+/, '') || stat.permissions;
+    }
+  } catch {
+    if (!propertiesDialog.visible || propertiesDialog.item?.path !== item.path) return;
+    propertiesDialog.error = '属性读取失败，请检查远程权限。';
+  } finally {
+    if (propertiesDialog.item?.path === item.path) {
+      propertiesDialog.loading = false;
+    }
+  }
 }
 
 function closePropertiesDialog() {
   propertiesDialog.visible = false;
   propertiesDialog.item = null;
+  propertiesDialog.stat = null;
+  propertiesDialog.loading = false;
+  propertiesDialog.error = '';
 }
 
 async function savePermissions() {
@@ -917,6 +955,17 @@ function formatPercent(value: number | undefined) {
 function progressWidth(value: number | undefined) {
   if (value === undefined || Number.isNaN(value)) return '0%';
   return `${Math.min(100, Math.max(0, value))}%`;
+}
+
+function formatModifiedAt(value: number | undefined) {
+  if (!value) return '-';
+  return new Date(value * 1000).toLocaleString();
+}
+
+function formatOwner(stat: RemoteFileStat) {
+  const uid = stat.uid === undefined ? '-' : stat.uid;
+  const gid = stat.gid === undefined ? '-' : stat.gid;
+  return `${uid}:${gid}`;
 }
 
 function formatSize(size: number) {
