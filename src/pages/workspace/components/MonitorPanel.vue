@@ -22,7 +22,7 @@
         </div>
       </section>
 
-      <section class="compact-section compact-section--plain">
+      <section class="compact-section compact-section--plain compact-section--metrics">
         <div class="metric-line metric-line--text">
           <span>运行</span>
           <strong>{{ valueOrDash(snapshot?.uptime) }}</strong>
@@ -54,7 +54,7 @@
         </div>
       </section>
 
-      <section class="compact-section">
+      <section class="compact-section compact-section--scroll compact-section--network">
         <div class="section-title">
           <span>网络</span>
           <strong>{{ refreshLabel }}</strong>
@@ -69,7 +69,7 @@
         <p v-else class="compact-muted">-</p>
       </section>
 
-      <section class="compact-section compact-section--table">
+      <section class="compact-section compact-section--scroll compact-section--table">
         <div class="disk-table">
           <div class="disk-table__head">
             <span>路径</span>
@@ -266,19 +266,23 @@ function formatRate(bytesPerSecond: number) {
 
 <style scoped>
 .monitor-stack {
-  display: flex;
+  display: grid;
+  height: 100%;
   min-height: 0;
-  flex-direction: column;
+  grid-template-rows: auto auto minmax(80px, 0.95fr) minmax(118px, 1.35fr);
   gap: 6px;
-  color: #dbeafe;
+  overflow: hidden;
+  color: var(--ls-text);
   font-size: 12px;
 }
 
 .compact-section,
 .monitor-empty {
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 6px;
-  background: rgba(2, 6, 23, 0.34);
+  min-height: 0;
+  border: 1px solid var(--ls-border);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-soft));
+  box-shadow: var(--ls-shadow-sm);
 }
 
 .compact-section {
@@ -288,15 +292,22 @@ function formatRate(bytesPerSecond: number) {
 .compact-section--plain {
   display: grid;
   gap: 2px;
-  border-color: transparent;
-  background: transparent;
+  border-color: var(--ls-border);
+  background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-soft));
+  padding: 6px;
+}
+
+.compact-section--scroll {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
 }
 
 .monitor-empty {
   display: grid;
   min-height: 118px;
   place-items: center;
-  color: #94a3b8;
+  color: var(--ls-text-muted);
   padding: 12px;
   text-align: center;
 }
@@ -310,17 +321,18 @@ function formatRate(bytesPerSecond: number) {
   display: grid;
   min-width: 0;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
 .host-line,
 .metric-line--text {
-  grid-template-columns: 34px minmax(0, 1fr);
+  grid-template-columns: 30px minmax(0, 1fr);
+  min-height: 18px;
 }
 
 .host-line span,
 .metric-line span {
-  color: #cbd5e1;
+  color: var(--ls-text-muted);
   white-space: nowrap;
 }
 
@@ -331,66 +343,73 @@ function formatRate(bytesPerSecond: number) {
 .disk-row strong {
   min-width: 0;
   overflow: hidden;
-  color: #e5e7eb;
-  font-size: 11px;
-  font-weight: 500;
+  color: var(--ls-text);
+  font-size: 10px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .metric-line {
-  grid-template-columns: 34px minmax(0, 1fr) 78px;
+  grid-template-columns: 30px minmax(0, 1fr) 66px;
   min-height: 18px;
 }
 
 .thin-progress,
 .disk-progress {
-  height: 13px;
+  height: 9px;
   overflow: hidden;
-  border: 1px solid rgba(148, 163, 184, 0.32);
-  background: rgba(15, 23, 42, 0.84);
+  border: 1px solid var(--ls-border);
+  border-radius: 999px;
+  background: var(--ls-panel-strong);
+  box-shadow: inset 0 1px 2px rgba(16, 24, 40, 0.1);
 }
 
 .thin-progress__bar,
 .disk-progress i {
   display: block;
   height: 100%;
+  border-radius: inherit;
 }
 
 .thin-progress__bar--cpu {
-  background: rgba(134, 239, 172, 0.72);
+  background: linear-gradient(90deg, var(--ls-success), #86efac);
 }
 
 .thin-progress__bar--memory {
-  background: rgba(251, 191, 36, 0.44);
+  background: linear-gradient(90deg, var(--ls-warning), #fde68a);
 }
 
 .thin-progress__bar--swap {
-  background: rgba(96, 165, 250, 0.44);
+  background: linear-gradient(90deg, var(--ls-primary), #93c5fd);
 }
 
 .section-title {
   grid-template-columns: minmax(0, 1fr) auto;
   height: 22px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(30, 41, 59, 0.7);
-  color: #e5e7eb;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--ls-border);
+  background: linear-gradient(180deg, var(--ls-panel-strong), var(--ls-panel-soft));
+  color: var(--ls-text);
   padding: 0 6px;
 }
 
 .section-title span,
 .disk-table__head span {
-  font-weight: 600;
+  font-weight: 700;
 }
 
 .network-table {
   display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
 }
 
 .network-row {
   grid-template-columns: minmax(0, 1fr) 58px 58px;
-  min-height: 22px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+  min-height: 20px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ls-border) 72%, transparent);
   padding: 0 6px;
 }
 
@@ -399,42 +418,49 @@ function formatRate(bytesPerSecond: number) {
 }
 
 .rate-down {
-  color: #86efac;
+  color: var(--ls-success);
   text-align: right;
 }
 
 .rate-up {
-  color: #fca5a5;
+  color: var(--ls-primary);
   text-align: right;
 }
 
 .disk-table {
-  display: grid;
+  display: flex;
   min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
 }
 
 .disk-table__head {
   grid-template-columns: minmax(0, 1fr) 82px;
-  height: 24px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(30, 41, 59, 0.7);
-  color: #e5e7eb;
+  height: 22px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--ls-border);
+  background: linear-gradient(180deg, var(--ls-panel-strong), var(--ls-panel-soft));
+  color: var(--ls-text);
   padding: 0 6px;
 }
 
 .disk-table__body {
   display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
 }
 
 .disk-row {
   grid-template-columns: minmax(0, 1fr) 82px;
-  min-height: 22px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.06);
+  min-height: 20px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ls-border) 64%, transparent);
   padding: 2px 6px 3px;
 }
 
 .disk-row:nth-child(even) {
-  background: rgba(148, 163, 184, 0.04);
+  background: color-mix(in srgb, var(--ls-panel-strong) 44%, transparent);
 }
 
 .disk-row strong {
@@ -445,11 +471,11 @@ function formatRate(bytesPerSecond: number) {
   grid-column: 1 / -1;
   height: 3px;
   border: 0;
-  background: rgba(30, 41, 59, 0.8);
+  background: var(--ls-panel-strong);
 }
 
 .disk-progress i {
-  background: linear-gradient(90deg, #22c55e, #f59e0b);
+  background: linear-gradient(90deg, var(--ls-success), var(--ls-warning));
 }
 
 .cell-ellipsis,
@@ -462,7 +488,7 @@ function formatRate(bytesPerSecond: number) {
 
 .compact-muted {
   margin: 0;
-  color: #94a3b8;
-  padding: 6px;
+  color: var(--ls-text-muted);
+  padding: 8px;
 }
 </style>

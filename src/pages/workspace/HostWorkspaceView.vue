@@ -1,45 +1,21 @@
 <template>
   <main class="workspace-shell">
-    <header class="titlebar">
-      <div class="brand-block">
-        <div class="brand-mark">L</div>
-        <div>
-          <h1>LiteShell</h1>
-          <p>轻量 SSH / SFTP 客户端</p>
-        </div>
-      </div>
-
-      <div class="host-tabs">
-        <button class="host-tab" :class="{ 'host-tab--active': workspaceStore.hasActiveHost }" type="button">
-          <span class="online-dot" :class="{ 'online-dot--muted': !workspaceStore.hasActiveHost }"></span>
-          <span>{{ activeHostLabel }}</span>
-          <span class="auth-state">{{ credentialLabel }}</span>
-          <span class="tab-close">×</span>
-        </button>
-        <button class="tab-add" type="button">+</button>
-      </div>
-
-      <div class="window-actions" aria-label="window actions">
-        <button type="button">☰</button>
-        <button type="button">—</button>
-        <button type="button">□</button>
-        <button type="button">×</button>
-      </div>
-    </header>
-
     <section
       class="workspace-body"
       :class="{ 'workspace-body--monitor-collapsed': isMonitorCollapsed }"
       :style="{ gridTemplateColumns: workspaceBodyColumns }"
     >
       <nav class="icon-rail" aria-label="workspace navigation">
+        <div class="rail-brand">L</div>
         <button class="rail-item rail-item--active" title="终端" type="button">⌁</button>
         <button class="rail-item" title="文件" type="button">□</button>
         <button class="rail-item" title="工具箱" type="button">▣</button>
         <button class="rail-item" title="设置" type="button">⚙</button>
         <span class="rail-spacer"></span>
         <button class="rail-item" title="信息" type="button">i</button>
-        <button class="rail-item" title="主题" type="button">◐</button>
+        <button class="rail-item" :title="isDarkTheme ? '切换浅色' : '切换暗色'" type="button" @click="toggleTheme">
+          {{ isDarkTheme ? '☀' : '◐' }}
+        </button>
       </nav>
 
       <aside v-if="!isMonitorCollapsed" ref="monitorPanelRef" class="monitor-panel">
@@ -83,10 +59,6 @@
         </div>
 
         <section class="panel sftp-panel">
-          <header class="panel-head">
-            <div><span class="online-dot" :class="{ 'online-dot--muted': !workspaceStore.hasActiveHost }"></span><strong>SFTP 文件管理器</strong></div>
-            <div class="panel-actions"><span class="status-chip">{{ credentialLabel }}</span><span>{{ activeUserLabel }}</span></div>
-          </header>
           <div class="workspace-sftp"><SftpView /></div>
         </section>
       </section>
@@ -110,11 +82,14 @@ type WorkspaceLayoutPreference = {
   terminalRatio?: number;
 };
 
+type AppTheme = 'light' | 'dark';
+
 const LAYOUT_STORAGE_KEY = 'lite-shell.workspace.layout';
-const DEFAULT_MONITOR_WIDTH = 292;
+const THEME_STORAGE_KEY = 'lite-shell.theme';
+const DEFAULT_MONITOR_WIDTH = 260;
 const COLLAPSED_EXPAND_WIDTH = 28;
-const MIN_MONITOR_WIDTH = 220;
-const MAX_MONITOR_WIDTH = 420;
+const MIN_MONITOR_WIDTH = 238;
+const MAX_MONITOR_WIDTH = 360;
 const DEFAULT_TERMINAL_RATIO = 0.52;
 const MIN_PANEL_RATIO = 0.28;
 const MAX_PANEL_RATIO = 0.72;
@@ -127,8 +102,8 @@ const monitorWidth = ref(DEFAULT_MONITOR_WIDTH);
 const isMonitorCollapsed = ref(false);
 const resizingPanel = ref(false);
 const resizingMonitor = ref(false);
+const theme = ref<AppTheme>('light');
 
-const activeHostLabel = computed(() => workspaceStore.activeHostLabel);
 const credentialLabel = computed(() =>
   workspaceStore.activeHostHasCredential ? '认证：内存' : '认证：未缓存',
 );
@@ -137,6 +112,7 @@ const activeUserLabel = computed(() => {
   if (!host) return '未连接';
   return `${host.username}@${host.host}`;
 });
+const isDarkTheme = computed(() => theme.value === 'dark');
 const workspaceMainRows = computed(() => {
   const topRatio = terminalRatio.value.toFixed(3);
   const bottomRatio = (1 - terminalRatio.value).toFixed(3);
@@ -151,6 +127,7 @@ const workspaceBodyColumns = computed(() => {
 });
 
 onMounted(() => {
+  restoreThemePreference();
   restoreLayoutPreference();
 });
 
@@ -158,6 +135,30 @@ onBeforeUnmount(() => {
   stopPanelResize();
   stopMonitorResize();
 });
+
+function toggleTheme() {
+  applyTheme(isDarkTheme.value ? 'light' : 'dark');
+}
+
+function applyTheme(nextTheme: AppTheme) {
+  theme.value = nextTheme;
+  document.documentElement.dataset.theme = nextTheme;
+
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+  } catch {
+    // Ignore localStorage quota or privacy-mode failures.
+  }
+}
+
+function restoreThemePreference() {
+  try {
+    const value = localStorage.getItem(THEME_STORAGE_KEY);
+    applyTheme(value === 'dark' ? 'dark' : 'light');
+  } catch {
+    applyTheme('light');
+  }
+}
 
 function toggleMonitorPanel() {
   isMonitorCollapsed.value = !isMonitorCollapsed.value;
@@ -287,25 +288,14 @@ function clamp(value: number, min: number, max: number) {
 
 .workspace-terminal :deep(.content-grid) {
   height: 100%;
-  grid-template-columns: 260px minmax(0, 1fr);
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
   padding: 8px;
-}
-
-.workspace-terminal :deep(.connect-card),
-.workspace-terminal :deep(.host-list-card),
-.workspace-terminal :deep(.quick-card) {
-  border-color: rgba(148, 163, 184, 0.12);
-  border-radius: 10px;
-  background: rgba(2, 6, 23, 0.54);
-  padding: 10px;
 }
 
 .workspace-terminal :deep(.workspace-card),
 .workspace-sftp :deep(.browser-card) {
-  border-color: rgba(148, 163, 184, 0.12);
+  border-color: var(--ls-border);
   border-radius: 10px;
-  background: rgba(2, 6, 23, 0.68);
 }
 
 .workspace-terminal :deep(.terminal-card) {
@@ -313,18 +303,34 @@ function clamp(value: number, min: number, max: number) {
 }
 
 .workspace-terminal :deep(.tabs-bar) {
-  min-height: 36px;
-  padding: 5px 8px;
+  min-height: 34px;
+  padding: 4px 8px;
+}
+
+.workspace-terminal :deep(.quick-connect-page) {
+  min-height: 0;
+}
+
+.workspace-terminal :deep(.connection-manager-dialog) {
+  max-height: calc(100vh - 80px);
 }
 
 .workspace-sftp :deep(.content-grid) {
   height: 100%;
   grid-template-columns: minmax(0, 1fr);
-  padding: 8px;
+  padding: 6px;
 }
 
-.workspace-sftp :deep(.path-bar) {
-  padding: 8px;
+.rail-brand {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--ls-primary), #38bdf8);
+  box-shadow: var(--ls-shadow-sm);
+  color: #fff;
+  font-weight: 800;
 }
 
 .monitor-panel {
@@ -337,17 +343,17 @@ function clamp(value: number, min: number, max: number) {
   width: 24px;
   height: 24px;
   place-items: center;
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  border: 1px solid var(--ls-border-strong);
   border-radius: 7px;
-  background: rgba(2, 6, 23, 0.74);
-  color: #cbd5e1;
+  background: linear-gradient(180deg, var(--ls-panel), var(--ls-panel-strong));
+  color: var(--ls-text-muted);
   cursor: pointer;
 }
 
 .monitor-toggle {
   flex: 0 0 auto;
   align-self: flex-end;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .monitor-expand-button {
@@ -358,8 +364,8 @@ function clamp(value: number, min: number, max: number) {
 
 .monitor-toggle:hover,
 .monitor-expand-button:hover {
-  border-color: rgba(96, 165, 250, 0.5);
-  color: #dbeafe;
+  border-color: var(--ls-primary);
+  color: var(--ls-primary);
 }
 
 .workspace-vertical-splitter {
@@ -375,12 +381,12 @@ function clamp(value: number, min: number, max: number) {
   width: 4px;
   height: 54px;
   border-radius: 999px;
-  background: rgba(148, 163, 184, 0.24);
+  background: color-mix(in srgb, var(--ls-border-strong) 45%, transparent);
   content: '';
 }
 
 .workspace-vertical-splitter:hover::before {
-  background: rgba(96, 165, 250, 0.6);
+  background: color-mix(in srgb, var(--ls-primary) 64%, transparent);
 }
 
 .splitter {
@@ -388,8 +394,8 @@ function clamp(value: number, min: number, max: number) {
 }
 
 .splitter:hover span {
-  background: rgba(96, 165, 250, 0.52);
-  color: #dbeafe;
+  background: color-mix(in srgb, var(--ls-primary) 52%, transparent);
+  color: var(--ls-primary);
 }
 
 :global(body.is-resizing-row),
@@ -402,11 +408,5 @@ function clamp(value: number, min: number, max: number) {
 :global(body.is-resizing-column *) {
   cursor: col-resize !important;
   user-select: none;
-}
-
-@media (max-width: 1260px) {
-  .workspace-terminal :deep(.content-grid) {
-    grid-template-columns: 220px minmax(0, 1fr);
-  }
 }
 </style>
