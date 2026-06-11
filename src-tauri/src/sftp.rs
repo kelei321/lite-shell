@@ -47,6 +47,19 @@ pub struct RemoteFileItem {
     size: u64,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFileStat {
+    name: String,
+    path: String,
+    is_dir: bool,
+    size: u64,
+    permissions: String,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    modified_at: Option<u64>,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RemotePathInput {
@@ -93,6 +106,15 @@ pub fn sftp_list_dir(
     path: String,
 ) -> Result<Vec<RemoteFileItem>, String> {
     inner_sftp_list_dir(state, connection_id, path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn sftp_stat(
+    state: State<SftpState>,
+    connection_id: String,
+    path: String,
+) -> Result<RemoteFileStat, String> {
+    inner_sftp_stat(&state, &connection_id, &path).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -263,6 +285,30 @@ fn inner_sftp_list_dir(
     });
 
     Ok(items)
+}
+
+fn inner_sftp_stat(
+    state: &SftpState,
+    connection_id: &str,
+    path: &str,
+) -> Result<RemoteFileStat> {
+    let handle = get_sftp_handle(state, connection_id)?;
+    let sftp = handle.sftp.lock();
+    let stat = sftp
+        .stat(Path::new(path))
+        .with_context(|| format!("stat remote path failed: {path}"))?;
+    let name = remote_name(path);
+
+    Ok(RemoteFileStat {
+        name,
+        path: path.to_string(),
+        is_dir: stat.is_dir(),
+        size: stat.size.unwrap_or(0),
+        permissions: format_permissions(stat.perm),
+        uid: stat.uid,
+        gid: stat.gid,
+        modified_at: stat.mtime,
+    })
 }
 
 fn inner_sftp_download_file(
@@ -642,4 +688,17 @@ fn join_remote_path(parent: &str, name: &str) -> String {
     } else {
         format!("{parent}/{name}")
     }
+}
+
+fn remote_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn format_permissions(perm: Option<u32>) -> String {
+    perm.map(|value| format!("{:o}", value & 0o7777))
+        .unwrap_or_else(|| "-".to_string())
 }
