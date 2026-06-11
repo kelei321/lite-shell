@@ -512,9 +512,9 @@ fn copy_with_progress_accum<R: Read, W: Write>(
         }
 
         writer.write_all(&buffer[..read_size])?;
-        *transferred_bytes = transferred_bytes.saturating_add(read_size as u64);
+        *transferred_bytes = (*transferred_bytes).saturating_add(read_size as u64);
 
-        if transferred_bytes.saturating_sub(last_emitted_bytes) >= TRANSFER_PROGRESS_STEP_BYTES
+        if (*transferred_bytes).saturating_sub(last_emitted_bytes) >= TRANSFER_PROGRESS_STEP_BYTES
             || (total_bytes > 0 && *transferred_bytes >= total_bytes)
         {
             emit_transfer_progress(app, transfer_id, *transferred_bytes, total_bytes, "running");
