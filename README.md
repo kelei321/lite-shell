@@ -137,7 +137,7 @@ npm run dev
 | `npm run typecheck` | 执行 Vue 和 TypeScript 类型检查 |
 | `npm run format` | 格式化 Rust 代码 |
 | `npm run format:check` | 检查 Rust 格式，不修改文件 |
-| `npm run lint` | 使用 Clippy 严格检查 Rust 代码 |
+| `npm run lint` | 使用 Clippy 阻断 correctness 和 suspicious 高风险问题 |
 | `npm run test` | 运行 Rust 测试 |
 | `npm run check` | 依次执行格式检查、Clippy 和类型检查 |
 | `npm run validate` | 执行全部检查、测试和前端生产构建 |
@@ -163,12 +163,12 @@ CI 使用 Windows runner，并执行：
 
 1. `npm ci`
 2. Rust `rustfmt` 检查
-3. Rust Clippy 严格检查
+3. Rust Clippy correctness 和 suspicious 检查
 4. Vue 和 TypeScript 类型检查
 5. Rust 测试
 6. Vite 前端生产构建
 
-同一分支的新运行会取消旧运行，避免重复占用 CI 资源。
+前端与 Rust 使用独立 job 并行运行，任一 job 失败不会跳过另一组校验。同一分支的新运行会取消旧运行，避免重复占用 CI 资源。
 
 ## 数据与安全
 
