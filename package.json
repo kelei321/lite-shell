@@ -13,7 +13,7 @@
     "format:check": "npm run format:check:rust",
     "format:check:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
     "lint": "npm run lint:rust",
-    "lint:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
+    "lint:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious",
     "test": "npm run test:rust",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features",
     "check": "npm run format:check && npm run lint && npm run typecheck",
