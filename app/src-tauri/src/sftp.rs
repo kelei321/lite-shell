@@ -1,0 +1,1045 @@
+use std::{
+    collections::HashSet,
+    io::SeekFrom,
+    path::{Path, PathBuf},
+    time::{Duration, Instant, UNIX_EPOCH},
+};
+
+use russh_sftp::{
+    client::{error::Error as SftpClientError, SftpSession},
+    protocol::{FileType, StatusCode},
+};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, State};
+use tokio::{
+    fs::{self, File, OpenOptions},
+    io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
+    sync::{Mutex, Semaphore},
+};
+
+use crate::ssh::{open_sftp, CommandError, SessionManager};
+
+pub struct SftpTransferManager {
+    cancelled: Mutex<HashSet<String>>,
+    slots: Semaphore,
+}
+
+impl Default for SftpTransferManager {
+    fn default() -> Self {
+        Self {
+            cancelled: Mutex::new(HashSet::new()),
+            slots: Semaphore::new(3),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalDirectoryManifest {
+    root_name: String,
+    directories: Vec<String>,
+    files: Vec<LocalManifestFile>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalManifestFile {
+    absolute_path: String,
+    relative_path: String,
+    size: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecursiveDeleteResult {
+    deleted_files: u64,
+    deleted_directories: u64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictStrategy {
+    Overwrite,
+    Skip,
+    Rename,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferResult {
+    path: String,
+    skipped: bool,
+    resumed_from: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectoryListing {
+    path: String,
+    entries: Vec<SftpEntry>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpEntry {
+    name: String,
+    path: String,
+    kind: &'static str,
+    size: u64,
+    modified_at: Option<u64>,
+    permissions: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferEvent {
+    transfer_id: String,
+    session_id: String,
+    direction: &'static str,
+    file_name: String,
+    transferred: u64,
+    total: u64,
+    state: &'static str,
+    message: Option<String>,
+    speed_bytes_per_second: u64,
+    eta_seconds: Option<u64>,
+    resumed_from: u64,
+}
+
+#[tauri::command]
+pub async fn sftp_cancel_transfer(
+    transfers: State<'_, SftpTransferManager>,
+    transfer_id: String,
+) -> Result<(), CommandError> {
+    if transfer_id.trim().is_empty() {
+        return Err(CommandError::new("INVALID_TRANSFER", "传输标识不能为空"));
+    }
+    transfers.cancelled.lock().await.insert(transfer_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_local_directory_manifest(
+    path: String,
+) -> Result<LocalDirectoryManifest, CommandError> {
+    let root = std::path::PathBuf::from(path.trim());
+    if !root.is_dir() {
+        return Err(CommandError::new(
+            "LOCAL_DIRECTORY_INVALID",
+            "本地目录不存在",
+        ));
+    }
+    let root_name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| CommandError::new("LOCAL_DIRECTORY_INVALID", "无法识别本地目录名称"))?
+        .to_owned();
+    let mut pending = vec![root.clone()];
+    let mut directories = Vec::new();
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let mut entries = fs::read_dir(&directory)
+            .await
+            .map_err(|error| CommandError::new("LOCAL_DIRECTORY_READ_FAILED", error.to_string()))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|error| CommandError::new("LOCAL_DIRECTORY_READ_FAILED", error.to_string()))?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|error| CommandError::new("LOCAL_ENTRY_READ_FAILED", error.to_string()))?;
+            let entry_path = entry.path();
+            let relative = entry_path
+                .strip_prefix(&root)
+                .map_err(|error| CommandError::new("LOCAL_PATH_FAILED", error.to_string()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if file_type.is_dir() {
+                directories.push(relative);
+                pending.push(entry_path);
+            } else if file_type.is_file() {
+                let size = entry
+                    .metadata()
+                    .await
+                    .map_err(|error| {
+                        CommandError::new("LOCAL_FILE_READ_FAILED", error.to_string())
+                    })?
+                    .len();
+                files.push(LocalManifestFile {
+                    absolute_path: entry_path.to_string_lossy().into_owned(),
+                    relative_path: relative,
+                    size,
+                });
+            }
+        }
+    }
+    directories.sort();
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(LocalDirectoryManifest {
+        root_name,
+        directories,
+        files,
+    })
+}
+
+#[tauri::command]
+pub async fn sftp_prepare_local_directory(
+    path: String,
+    conflict_strategy: ConflictStrategy,
+) -> Result<TransferResult, CommandError> {
+    if path.trim().is_empty() {
+        return Err(CommandError::new(
+            "LOCAL_DIRECTORY_INVALID",
+            "本地目录不能为空",
+        ));
+    }
+    let target_path = if fs::metadata(&path).await.is_ok() {
+        match conflict_strategy {
+            ConflictStrategy::Overwrite => path,
+            ConflictStrategy::Skip => {
+                return Ok(TransferResult {
+                    path,
+                    skipped: true,
+                    resumed_from: 0,
+                });
+            }
+            ConflictStrategy::Rename => unique_local_path(&path).await,
+        }
+    } else {
+        path
+    };
+    fs::create_dir_all(&target_path)
+        .await
+        .map_err(|error| CommandError::new("LOCAL_DIRECTORY_CREATE_FAILED", error.to_string()))?;
+    Ok(TransferResult {
+        path: target_path,
+        skipped: false,
+        resumed_from: 0,
+    })
+}
+
+#[tauri::command]
+pub async fn sftp_list(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    path: String,
+) -> Result<DirectoryListing, CommandError> {
+    let sftp = open_sftp(&manager, &session_id).await?;
+    let canonical_path = sftp
+        .canonicalize(if path.trim().is_empty() { "." } else { &path })
+        .await
+        .map_err(sftp_error("SFTP_PATH_FAILED"))?;
+    let directory = sftp
+        .read_dir(canonical_path.clone())
+        .await
+        .map_err(sftp_error("SFTP_LIST_FAILED"))?;
+    let mut entries = directory
+        .map(|entry| {
+            let metadata = entry.metadata();
+            let file_type = entry.file_type();
+            SftpEntry {
+                name: entry.file_name(),
+                path: entry.path(),
+                kind: file_kind(file_type),
+                size: metadata.len(),
+                modified_at: metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs()),
+                permissions: format!(
+                    "{}{}",
+                    if file_type.is_dir() { "d" } else { "-" },
+                    metadata.permissions()
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| (entry.kind != "directory", entry.name.to_lowercase()));
+    sftp.close().await.ok();
+    Ok(DirectoryListing {
+        path: canonical_path,
+        entries,
+    })
+}
+
+#[tauri::command]
+pub async fn sftp_upload(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    transfers: State<'_, SftpTransferManager>,
+    session_id: String,
+    local_path: String,
+    remote_path: String,
+    transfer_id: String,
+    conflict_strategy: ConflictStrategy,
+    resume: bool,
+) -> Result<TransferResult, CommandError> {
+    validate_transfer(&local_path, &remote_path, &transfer_id)?;
+    let _permit = transfers
+        .slots
+        .acquire()
+        .await
+        .map_err(|_| CommandError::new("TRANSFER_QUEUE_CLOSED", "传输队列已经关闭"))?;
+    let sftp = open_sftp(&manager, &session_id).await?;
+    let target_path = if sftp.metadata(remote_path.clone()).await.is_ok() {
+        match conflict_strategy {
+            ConflictStrategy::Overwrite => remote_path,
+            ConflictStrategy::Skip => {
+                sftp.close().await.ok();
+                return Ok(TransferResult {
+                    path: remote_path,
+                    skipped: true,
+                    resumed_from: 0,
+                });
+            }
+            ConflictStrategy::Rename => unique_remote_path(&sftp, &remote_path).await,
+        }
+    } else {
+        remote_path
+    };
+    let mut source = File::open(&local_path)
+        .await
+        .map_err(|error| CommandError::new("LOCAL_FILE_OPEN_FAILED", error.to_string()))?;
+    let total = source
+        .metadata()
+        .await
+        .map_err(|error| CommandError::new("LOCAL_FILE_READ_FAILED", error.to_string()))?
+        .len();
+    transfers.cancelled.lock().await.remove(&transfer_id);
+    let temporary_path = format!("{target_path}.liteshell.part");
+    let resumed_from = if resume {
+        sftp.metadata(temporary_path.clone())
+            .await
+            .map(|metadata| {
+                if metadata.len() <= total {
+                    metadata.len()
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let mut target = if resumed_from > 0 {
+        source
+            .seek(SeekFrom::Start(resumed_from))
+            .await
+            .map_err(|error| CommandError::new("LOCAL_FILE_SEEK_FAILED", error.to_string()))?;
+        let mut file = sftp
+            .open(temporary_path.clone())
+            .await
+            .map_err(sftp_error("SFTP_UPLOAD_OPEN_FAILED"))?;
+        file.seek(SeekFrom::Start(resumed_from))
+            .await
+            .map_err(|error| CommandError::new("SFTP_UPLOAD_SEEK_FAILED", error.to_string()))?;
+        file
+    } else {
+        sftp.create(temporary_path.clone())
+            .await
+            .map_err(sftp_error("SFTP_UPLOAD_OPEN_FAILED"))?
+    };
+    let result = transfer(
+        &app,
+        &session_id,
+        &transfer_id,
+        "upload",
+        display_name(&local_path),
+        total,
+        resumed_from,
+        &mut source,
+        &mut target,
+        &transfers,
+    )
+    .await;
+    if let Err(error) = result {
+        let state = if error.code == "TRANSFER_CANCELLED" {
+            "cancelled"
+        } else {
+            "failed"
+        };
+        emit_transfer(
+            &app,
+            &transfer_id,
+            &session_id,
+            "upload",
+            &display_name(&local_path),
+            0,
+            total,
+            state,
+            Some(error.message.clone()),
+            0,
+            None,
+            resumed_from,
+        );
+        transfers.cancelled.lock().await.remove(&transfer_id);
+        sftp.close().await.ok();
+        return Err(error);
+    }
+    target
+        .shutdown()
+        .await
+        .map_err(|error| CommandError::new("SFTP_UPLOAD_CLOSE_FAILED", error.to_string()))?;
+    let backup_path = format!("{target_path}.liteshell-{transfer_id}.backup");
+    let has_original = sftp.metadata(target_path.clone()).await.is_ok();
+    if has_original {
+        sftp.remove_file(backup_path.clone()).await.ok();
+        sftp.rename(target_path.clone(), backup_path.clone())
+            .await
+            .map_err(sftp_error("SFTP_UPLOAD_BACKUP_FAILED"))?;
+    }
+    if let Err(error) = sftp
+        .rename(temporary_path.clone(), target_path.clone())
+        .await
+    {
+        if has_original {
+            sftp.rename(backup_path.clone(), target_path.clone())
+                .await
+                .ok();
+        }
+        sftp.remove_file(temporary_path).await.ok();
+        transfers.cancelled.lock().await.remove(&transfer_id);
+        emit_transfer(
+            &app,
+            &transfer_id,
+            &session_id,
+            "upload",
+            &display_name(&local_path),
+            total,
+            total,
+            "failed",
+            Some(error.to_string()),
+            0,
+            None,
+            resumed_from,
+        );
+        sftp.close().await.ok();
+        return Err(CommandError::new(
+            "SFTP_UPLOAD_COMMIT_FAILED",
+            error.to_string(),
+        ));
+    }
+    if has_original {
+        sftp.remove_file(backup_path).await.ok();
+    }
+    emit_transfer(
+        &app,
+        &transfer_id,
+        &session_id,
+        "upload",
+        &display_name(&local_path),
+        total,
+        total,
+        "completed",
+        None,
+        0,
+        Some(0),
+        resumed_from,
+    );
+    transfers.cancelled.lock().await.remove(&transfer_id);
+    sftp.close().await.ok();
+    Ok(TransferResult {
+        path: target_path,
+        skipped: false,
+        resumed_from,
+    })
+}
+
+#[tauri::command]
+pub async fn sftp_download(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    transfers: State<'_, SftpTransferManager>,
+    session_id: String,
+    remote_path: String,
+    local_path: String,
+    transfer_id: String,
+    conflict_strategy: ConflictStrategy,
+    resume: bool,
+) -> Result<TransferResult, CommandError> {
+    validate_transfer(&local_path, &remote_path, &transfer_id)?;
+    let _permit = transfers
+        .slots
+        .acquire()
+        .await
+        .map_err(|_| CommandError::new("TRANSFER_QUEUE_CLOSED", "传输队列已经关闭"))?;
+    let sftp = open_sftp(&manager, &session_id).await?;
+    let target_path = if fs::metadata(&local_path).await.is_ok() {
+        match conflict_strategy {
+            ConflictStrategy::Overwrite => local_path,
+            ConflictStrategy::Skip => {
+                sftp.close().await.ok();
+                return Ok(TransferResult {
+                    path: local_path,
+                    skipped: true,
+                    resumed_from: 0,
+                });
+            }
+            ConflictStrategy::Rename => unique_local_path(&local_path).await,
+        }
+    } else {
+        local_path
+    };
+    let total = sftp
+        .metadata(remote_path.clone())
+        .await
+        .map_err(sftp_error("SFTP_DOWNLOAD_METADATA_FAILED"))?
+        .len();
+    let mut source = sftp
+        .open(remote_path.clone())
+        .await
+        .map_err(sftp_error("SFTP_DOWNLOAD_OPEN_FAILED"))?;
+    transfers.cancelled.lock().await.remove(&transfer_id);
+    let temporary_path = format!("{target_path}.liteshell.part");
+    let resumed_from = if resume {
+        fs::metadata(&temporary_path)
+            .await
+            .map(|metadata| {
+                if metadata.len() <= total {
+                    metadata.len()
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let mut target = if resumed_from > 0 {
+        source
+            .seek(SeekFrom::Start(resumed_from))
+            .await
+            .map_err(|error| CommandError::new("SFTP_DOWNLOAD_SEEK_FAILED", error.to_string()))?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(&temporary_path)
+            .await
+            .map_err(|error| CommandError::new("LOCAL_FILE_OPEN_FAILED", error.to_string()))?;
+        file.seek(SeekFrom::Start(resumed_from))
+            .await
+            .map_err(|error| CommandError::new("LOCAL_FILE_SEEK_FAILED", error.to_string()))?;
+        file
+    } else {
+        File::create(&temporary_path)
+            .await
+            .map_err(|error| CommandError::new("LOCAL_FILE_CREATE_FAILED", error.to_string()))?
+    };
+    let result = transfer(
+        &app,
+        &session_id,
+        &transfer_id,
+        "download",
+        display_name(&remote_path),
+        total,
+        resumed_from,
+        &mut source,
+        &mut target,
+        &transfers,
+    )
+    .await;
+    if let Err(error) = result {
+        let state = if error.code == "TRANSFER_CANCELLED" {
+            "cancelled"
+        } else {
+            "failed"
+        };
+        emit_transfer(
+            &app,
+            &transfer_id,
+            &session_id,
+            "download",
+            &display_name(&remote_path),
+            0,
+            total,
+            state,
+            Some(error.message.clone()),
+            0,
+            None,
+            resumed_from,
+        );
+        transfers.cancelled.lock().await.remove(&transfer_id);
+        sftp.close().await.ok();
+        return Err(error);
+    }
+    target
+        .shutdown()
+        .await
+        .map_err(|error| CommandError::new("LOCAL_FILE_WRITE_FAILED", error.to_string()))?;
+    let backup_path = format!("{target_path}.liteshell-{transfer_id}.backup");
+    let has_original = fs::metadata(&target_path).await.is_ok();
+    if has_original {
+        fs::remove_file(&backup_path).await.ok();
+        fs::rename(&target_path, &backup_path)
+            .await
+            .map_err(|error| CommandError::new("LOCAL_FILE_BACKUP_FAILED", error.to_string()))?;
+    }
+    if let Err(error) = fs::rename(&temporary_path, &target_path).await {
+        if has_original {
+            fs::rename(&backup_path, &target_path).await.ok();
+        }
+        fs::remove_file(&temporary_path).await.ok();
+        transfers.cancelled.lock().await.remove(&transfer_id);
+        emit_transfer(
+            &app,
+            &transfer_id,
+            &session_id,
+            "download",
+            &display_name(&remote_path),
+            total,
+            total,
+            "failed",
+            Some(error.to_string()),
+            0,
+            None,
+            resumed_from,
+        );
+        sftp.close().await.ok();
+        return Err(CommandError::new(
+            "LOCAL_FILE_COMMIT_FAILED",
+            error.to_string(),
+        ));
+    }
+    if has_original {
+        fs::remove_file(backup_path).await.ok();
+    }
+    emit_transfer(
+        &app,
+        &transfer_id,
+        &session_id,
+        "download",
+        &display_name(&remote_path),
+        total,
+        total,
+        "completed",
+        None,
+        0,
+        Some(0),
+        resumed_from,
+    );
+    transfers.cancelled.lock().await.remove(&transfer_id);
+    sftp.close().await.ok();
+    Ok(TransferResult {
+        path: target_path,
+        skipped: false,
+        resumed_from,
+    })
+}
+
+#[tauri::command]
+pub async fn sftp_create_directory(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    path: String,
+) -> Result<(), CommandError> {
+    validate_remote_mutation_path(&path)?;
+    let sftp = open_sftp(&manager, &session_id).await?;
+    if let Ok(metadata) = sftp.metadata(path.clone()).await {
+        sftp.close().await.ok();
+        return if metadata.is_dir() {
+            Ok(())
+        } else {
+            Err(CommandError::new(
+                "SFTP_DIRECTORY_CONFLICT",
+                "目标路径已存在同名文件",
+            ))
+        };
+    }
+    sftp.create_dir(path)
+        .await
+        .map_err(sftp_error("SFTP_CREATE_DIRECTORY_FAILED"))?;
+    sftp.close().await.ok();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_rename(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    old_path: String,
+    new_path: String,
+) -> Result<(), CommandError> {
+    validate_remote_mutation_path(&old_path)?;
+    validate_remote_mutation_path(&new_path)?;
+    let sftp = open_sftp(&manager, &session_id).await?;
+    sftp.rename(old_path, new_path)
+        .await
+        .map_err(sftp_error("SFTP_RENAME_FAILED"))?;
+    sftp.close().await.ok();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_delete(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    path: String,
+    is_directory: bool,
+) -> Result<(), CommandError> {
+    validate_remote_mutation_path(&path)?;
+    let sftp = open_sftp(&manager, &session_id).await?;
+    if is_directory {
+        sftp.remove_dir(path)
+            .await
+            .map_err(sftp_error("SFTP_DELETE_DIRECTORY_FAILED"))?;
+    } else {
+        sftp.remove_file(path)
+            .await
+            .map_err(sftp_error("SFTP_DELETE_FILE_FAILED"))?;
+    }
+    sftp.close().await.ok();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_delete_recursive(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    path: String,
+) -> Result<RecursiveDeleteResult, CommandError> {
+    validate_remote_mutation_path(&path)?;
+    let sftp = open_sftp(&manager, &session_id).await?;
+    let root = sftp
+        .canonicalize(path)
+        .await
+        .map_err(sftp_error("SFTP_DELETE_PATH_FAILED"))?;
+    validate_remote_mutation_path(&root)?;
+    let root_prefix = format!("{}/", root.trim_end_matches('/'));
+    let mut stack = vec![(root, false)];
+    let mut deleted_files = 0_u64;
+    let mut deleted_directories = 0_u64;
+
+    while let Some((current, visited)) = stack.pop() {
+        if visited {
+            sftp.remove_dir(current)
+                .await
+                .map_err(sftp_error("SFTP_DELETE_DIRECTORY_FAILED"))?;
+            deleted_directories += 1;
+            continue;
+        }
+
+        stack.push((current.clone(), true));
+        let entries = sftp
+            .read_dir(current)
+            .await
+            .map_err(sftp_error("SFTP_DELETE_LIST_FAILED"))?;
+        for entry in entries {
+            let name = entry.file_name();
+            if matches!(name.as_str(), "." | "..") {
+                continue;
+            }
+            let child_path = entry.path();
+            if !child_path.starts_with(&root_prefix) {
+                sftp.close().await.ok();
+                return Err(CommandError::new(
+                    "SFTP_DELETE_UNSAFE_PATH",
+                    "服务器返回了目标目录之外的路径，已停止删除",
+                ));
+            }
+            let file_type = entry.file_type();
+            if file_type.is_dir() && !file_type.is_symlink() {
+                stack.push((child_path, false));
+            } else {
+                sftp.remove_file(child_path)
+                    .await
+                    .map_err(sftp_error("SFTP_DELETE_FILE_FAILED"))?;
+                deleted_files += 1;
+            }
+        }
+    }
+
+    sftp.close().await.ok();
+    Ok(RecursiveDeleteResult {
+        deleted_files,
+        deleted_directories,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn transfer<R, W>(
+    app: &AppHandle,
+    session_id: &str,
+    transfer_id: &str,
+    direction: &'static str,
+    file_name: String,
+    total: u64,
+    resumed_from: u64,
+    source: &mut R,
+    target: &mut W,
+    transfers: &State<'_, SftpTransferManager>,
+) -> Result<(), CommandError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut transferred = resumed_from;
+    let started_at = Instant::now();
+    let mut last_emit = Instant::now();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    emit_transfer(
+        app,
+        transfer_id,
+        session_id,
+        direction,
+        &file_name,
+        transferred,
+        total,
+        "running",
+        None,
+        0,
+        None,
+        resumed_from,
+    );
+    loop {
+        if transfers.cancelled.lock().await.contains(transfer_id) {
+            return Err(CommandError::new("TRANSFER_CANCELLED", "传输已取消"));
+        }
+        let read = source
+            .read(&mut buffer)
+            .await
+            .map_err(|error| CommandError::new("TRANSFER_READ_FAILED", error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        target
+            .write_all(&buffer[..read])
+            .await
+            .map_err(|error| CommandError::new("TRANSFER_WRITE_FAILED", error.to_string()))?;
+        transferred += read as u64;
+        let elapsed = started_at.elapsed().as_secs_f64();
+        let speed = if elapsed > 0.0 {
+            ((transferred - resumed_from) as f64 / elapsed) as u64
+        } else {
+            0
+        };
+        let eta = (speed > 0).then(|| total.saturating_sub(transferred).div_ceil(speed));
+        if last_emit.elapsed() >= Duration::from_millis(200) || transferred >= total {
+            emit_transfer(
+                app,
+                transfer_id,
+                session_id,
+                direction,
+                &file_name,
+                transferred,
+                total,
+                "running",
+                None,
+                speed,
+                eta,
+                resumed_from,
+            );
+            last_emit = Instant::now();
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_transfer(
+    app: &AppHandle,
+    transfer_id: &str,
+    session_id: &str,
+    direction: &'static str,
+    file_name: &str,
+    transferred: u64,
+    total: u64,
+    state: &'static str,
+    message: Option<String>,
+    speed_bytes_per_second: u64,
+    eta_seconds: Option<u64>,
+    resumed_from: u64,
+) {
+    let _ = app.emit(
+        "sftp-transfer",
+        TransferEvent {
+            transfer_id: transfer_id.to_owned(),
+            session_id: session_id.to_owned(),
+            direction,
+            file_name: file_name.to_owned(),
+            transferred,
+            total,
+            state,
+            message,
+            speed_bytes_per_second,
+            eta_seconds,
+            resumed_from,
+        },
+    );
+}
+
+async fn unique_remote_path(sftp: &SftpSession, path: &str) -> String {
+    let (directory, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let (stem, extension) = split_file_name(name);
+    for index in 1..10_000 {
+        let candidate_name = if extension.is_empty() {
+            format!("{stem} ({index})")
+        } else {
+            format!("{stem} ({index}).{extension}")
+        };
+        let candidate = if directory.is_empty() {
+            candidate_name
+        } else if directory == "/" {
+            format!("/{candidate_name}")
+        } else {
+            format!("{directory}/{candidate_name}")
+        };
+        if sftp.metadata(candidate.clone()).await.is_err() {
+            return candidate;
+        }
+    }
+    format!("{path}.renamed")
+}
+
+async fn unique_local_path(path: &str) -> String {
+    let original = PathBuf::from(path);
+    let parent = original.parent().unwrap_or_else(|| Path::new(""));
+    let stem = original
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("file");
+    let extension = original.extension().and_then(|value| value.to_str());
+    for index in 1..10_000 {
+        let name = match extension {
+            Some(extension) => format!("{stem} ({index}).{extension}"),
+            None => format!("{stem} ({index})"),
+        };
+        let candidate = parent.join(name);
+        if fs::metadata(&candidate).await.is_err() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    format!("{path}.renamed")
+}
+
+fn split_file_name(name: &str) -> (&str, &str) {
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, extension),
+        _ => (name, ""),
+    }
+}
+
+fn validate_transfer(
+    local_path: &str,
+    remote_path: &str,
+    transfer_id: &str,
+) -> Result<(), CommandError> {
+    if local_path.trim().is_empty()
+        || remote_path.trim().is_empty()
+        || transfer_id.trim().is_empty()
+    {
+        return Err(CommandError::new(
+            "INVALID_TRANSFER",
+            "本地路径、远程路径和传输标识不能为空",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_remote_mutation_path(path: &str) -> Result<(), CommandError> {
+    let path = path.trim();
+    if path.is_empty() || matches!(path, "/" | "." | "..") {
+        return Err(CommandError::new(
+            "INVALID_REMOTE_PATH",
+            "不能修改空路径、根目录或相对父目录",
+        ));
+    }
+    Ok(())
+}
+
+fn display_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_owned()
+}
+
+fn file_kind(file_type: FileType) -> &'static str {
+    if file_type.is_dir() {
+        "directory"
+    } else if file_type.is_symlink() {
+        "symlink"
+    } else if file_type.is_file() {
+        "file"
+    } else {
+        "other"
+    }
+}
+
+fn sftp_error(code: &'static str) -> impl FnOnce(SftpClientError) -> CommandError {
+    move |error| {
+        let message = match &error {
+            SftpClientError::Status(status) => match status.status_code {
+                StatusCode::PermissionDenied => "权限不足，请检查当前用户及父目录权限".to_owned(),
+                StatusCode::NoSuchFile => "文件或目录不存在，可能已被其他操作删除".to_owned(),
+                StatusCode::Failure => {
+                    "服务器拒绝了操作，目录可能非空、文件正在使用或权限不足".to_owned()
+                }
+                StatusCode::NoConnection | StatusCode::ConnectionLost => {
+                    "SFTP 连接已经断开".to_owned()
+                }
+                StatusCode::OpUnsupported => "服务器不支持此 SFTP 操作".to_owned(),
+                _ => error.to_string(),
+            },
+            SftpClientError::Timeout => "SFTP 操作超时".to_owned(),
+            _ => error.to_string(),
+        };
+        CommandError::new(code, message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_transfer_paths() {
+        assert!(validate_transfer("C:\\a.txt", "/tmp/a.txt", "transfer-1").is_ok());
+        assert_eq!(
+            validate_transfer("", "/tmp/a.txt", "transfer-1")
+                .unwrap_err()
+                .code,
+            "INVALID_TRANSFER"
+        );
+    }
+
+    #[test]
+    fn protects_remote_root_paths() {
+        assert_eq!(
+            validate_remote_mutation_path("/").unwrap_err().code,
+            "INVALID_REMOTE_PATH"
+        );
+        assert!(validate_remote_mutation_path("/home/test").is_ok());
+    }
+
+    #[test]
+    fn splits_names_for_conflict_renaming() {
+        assert_eq!(split_file_name("archive.tar.gz"), ("archive.tar", "gz"));
+        assert_eq!(split_file_name("README"), ("README", ""));
+        assert_eq!(split_file_name(".env"), (".env", ""));
+    }
+
+    #[tokio::test]
+    async fn builds_local_directory_manifest() {
+        let root = std::env::temp_dir().join(format!("liteshell-sftp-test-{}", std::process::id()));
+        fs::create_dir_all(root.join("nested")).await.unwrap();
+        fs::write(root.join("root.txt"), b"root").await.unwrap();
+        fs::write(root.join("nested").join("child.txt"), b"child")
+            .await
+            .unwrap();
+
+        let manifest = sftp_local_directory_manifest(root.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        assert_eq!(manifest.files.len(), 2);
+        assert!(manifest.directories.iter().any(|path| path == "nested"));
+        assert!(manifest
+            .files
+            .iter()
+            .any(|file| file.relative_path == "nested/child.txt"));
+
+        fs::remove_dir_all(root).await.unwrap();
+    }
+}

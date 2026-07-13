@@ -1,0 +1,44 @@
+# Dependencies and package-manager caches
+node_modules/
+.npm-cache/
+.yarn/
+.pnp.*
+
+# Frontend output
+dist/
+coverage/
+*.tsbuildinfo
+
+# Rust and Tauri generated output
+target/
+src-tauri/gen/
+
+# Local development files
+.idea/
+.vscode/
+*.log
+*.tmp
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.key
+connections.json
+known_hosts
+
+# LiteShell incomplete transfer files
+*.liteshell.part
+*.liteshell-*.backup
+
+# Local agent handoff/instructions
+.agents/
+.codex/
+AGENTS.md
+handoff.md
