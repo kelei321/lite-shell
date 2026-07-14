@@ -1934,7 +1934,7 @@ mod tests {
             "C:\\tmp\\file.txt.liteshell-task-1.part",
         );
         assert!(validate_checkpoint_temporary_path(&checkpoint).is_ok());
-        let mut invalid = checkpoint;
+        let mut invalid = checkpoint.clone();
         invalid.temporary_path = "C:\\tmp\\unrelated.part".to_owned();
         assert_eq!(
             validate_checkpoint_temporary_path(&invalid)
