@@ -22,6 +22,14 @@ def replace_section(start: str, end: str, replacement: str, label: str) -> None:
     text = text[:start_index] + replacement.rstrip() + "\n\n" + text[end_index:]
 
 
+def replace_to_end(start: str, replacement: str, label: str) -> None:
+    global text
+    start_index = text.find(start)
+    if start_index < 0:
+        raise RuntimeError(f"{label}: start marker not found")
+    text = text[:start_index] + replacement.rstrip() + "\n"
+
+
 replace_once(
     "当前状态：PR1～PR5 已合并；PR6 递归传输和符号链接安全已实现，正在等待 CI、code review 和合并。PR6 合并后进入 PR7。",
     "当前状态：PR1～PR5 已合并；PR6 递归传输和符号链接安全已实现，CI 与 code review 已通过，等待合并。PR6 合并后进入 PR7。",
@@ -87,12 +95,9 @@ replace_section(
 
 - PR1～PR5 已合并。
 - PR #7（计划 PR5）squash merge：`5d2e9a197c44f841b95d3c4fb1d3d45649f4e184`。
-- PR #8（计划 PR6）最终 head：`bbcf5e3e1cd166601ead5cf1c1dd3ed8e1a4408e`。
-- PR #8 CI run `29307771179` 已通过：
-  - 前端状态测试、Vue/TypeScript 类型检查和 Vite 生产构建。
-  - Rust 格式检查、Rust 单元测试和 Clippy correctness/suspicious。
+- PR #8（计划 PR6）的实现已通过完整 Frontend 与 Rust CI；合并前仍需确认最新 head 的检查结果。
 
-PR6 新增测试覆盖：
+PR6 自动化测试覆盖：
 
 - 递归深度、文件数量和累计大小限制。
 - 远程根目录边界判断。
@@ -120,13 +125,12 @@ PR6 新增测试覆盖：
     "validation section",
 )
 
-replace_section(
+replace_to_end(
     "## 12. 新会话启动提示词",
-    "```text",
-    '''## 12. 新会话启动提示词
+    r'''## 12. 新会话启动提示词
 
 ```text
-请继续开发 D:\\Project\\codex\\lite-shell 项目。
+请继续开发 D:\Project\codex\lite-shell 项目。
 
 开始前依次完整阅读：
 1. plan.md
