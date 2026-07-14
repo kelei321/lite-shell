@@ -79,7 +79,10 @@ impl SftpTransferManager {
         key: TransferTargetKey,
     ) -> Result<TransferTargetGuard<'_>, CommandError> {
         let mut targets = self.active_targets.lock().map_err(|_| {
-            CommandError::new("TRANSFER_TARGET_LOCK_FAILED", "传输目标锁不可用，请稍后重试")
+            CommandError::new(
+                "TRANSFER_TARGET_LOCK_FAILED",
+                "传输目标锁不可用，请稍后重试",
+            )
         })?;
         if !targets.insert(key.clone()) {
             return Err(CommandError::new(
