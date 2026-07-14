@@ -18,11 +18,12 @@ use tokio::{
     sync::{Mutex as AsyncMutex, Semaphore},
 };
 
-use crate::ssh::{open_sftp, CommandError, SessionManager};
+use crate::ssh::{matching_session_id, open_sftp, session_server_id, CommandError, SessionManager};
 
 pub struct SftpTransferManager {
     cancelled: AsyncMutex<HashSet<String>>,
     active_targets: StdMutex<HashSet<TransferTargetKey>>,
+    active_tasks: StdMutex<HashSet<String>>,
     slots: Semaphore,
 }
 
@@ -34,23 +35,23 @@ enum TransferDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TransferTargetKey {
-    session_id: String,
+    server_id: String,
     direction: TransferDirection,
     target_path: String,
 }
 
 impl TransferTargetKey {
-    fn upload(session_id: &str, target_path: &str) -> Self {
+    fn upload(server_id: &str, target_path: &str) -> Self {
         Self {
-            session_id: session_id.to_owned(),
+            server_id: server_id.to_owned(),
             direction: TransferDirection::Upload,
             target_path: normalize_remote_target(target_path),
         }
     }
 
-    fn download(session_id: &str, target_path: &str) -> Self {
+    fn download(server_id: &str, target_path: &str) -> Self {
         Self {
-            session_id: session_id.to_owned(),
+            server_id: server_id.to_owned(),
             direction: TransferDirection::Download,
             target_path: normalize_local_target(target_path),
         }
@@ -69,6 +70,22 @@ impl Drop for TransferTargetGuard<'_> {
         };
         if let Ok(mut targets) = self.manager.active_targets.lock() {
             targets.remove(&key);
+        }
+    }
+}
+
+struct TransferTaskGuard<'a> {
+    manager: &'a SftpTransferManager,
+    task_id: Option<String>,
+}
+
+impl Drop for TransferTaskGuard<'_> {
+    fn drop(&mut self) {
+        let Some(task_id) = self.task_id.take() else {
+            return;
+        };
+        if let Ok(mut tasks) = self.manager.active_tasks.lock() {
+            tasks.remove(&task_id);
         }
     }
 }
@@ -95,6 +112,22 @@ impl SftpTransferManager {
             key: Some(key),
         })
     }
+
+    fn acquire_task(&self, task_id: &str) -> Result<TransferTaskGuard<'_>, CommandError> {
+        let mut tasks = self.active_tasks.lock().map_err(|_| {
+            CommandError::new("TRANSFER_TASK_LOCK_FAILED", "传输任务锁不可用，请稍后重试")
+        })?;
+        if !tasks.insert(task_id.to_owned()) {
+            return Err(CommandError::new(
+                "TRANSFER_TASK_BUSY",
+                "该传输任务已经在运行",
+            ));
+        }
+        Ok(TransferTaskGuard {
+            manager: self,
+            task_id: Some(task_id.to_owned()),
+        })
+    }
 }
 
 impl Default for SftpTransferManager {
@@ -102,6 +135,7 @@ impl Default for SftpTransferManager {
         Self {
             cancelled: AsyncMutex::new(HashSet::new()),
             active_targets: StdMutex::new(HashSet::new()),
+            active_tasks: StdMutex::new(HashSet::new()),
             slots: Semaphore::new(3),
         }
     }
@@ -180,6 +214,8 @@ struct TransferEvent {
     resumed_from: u64,
 }
 
+const CHECKPOINT_VERSION: u8 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferCheckpoint {
@@ -192,10 +228,14 @@ pub struct TransferCheckpoint {
     target_path: String,
     source_size: u64,
     source_modified_at: Option<u64>,
+    #[serde(default)]
+    source_fingerprint: String,
     temporary_path: String,
     transferred: u64,
     created_at: u64,
     updated_at: u64,
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    available_session_id: Option<String>,
 }
 
 impl TransferCheckpoint {
@@ -209,11 +249,12 @@ impl TransferCheckpoint {
         target_path: &str,
         source_size: u64,
         source_modified_at: Option<u64>,
+        source_fingerprint: &str,
         temporary_path: &str,
     ) -> Self {
         let now = unix_now();
         Self {
-            version: 1,
+            version: CHECKPOINT_VERSION,
             task_id: task_id.to_owned(),
             session_id: session_id.to_owned(),
             server_id: server_id.to_owned(),
@@ -222,10 +263,12 @@ impl TransferCheckpoint {
             target_path: target_path.to_owned(),
             source_size,
             source_modified_at,
+            source_fingerprint: source_fingerprint.to_owned(),
             temporary_path: temporary_path.to_owned(),
             transferred: 0,
             created_at: now,
             updated_at: now,
+            available_session_id: None,
         }
     }
 }
@@ -407,17 +450,17 @@ pub async fn sftp_upload(
     remote_path: String,
     transfer_id: String,
     task_id: String,
-    server_id: String,
     conflict_strategy: ConflictStrategy,
     resume: bool,
 ) -> Result<TransferResult, CommandError> {
     validate_transfer(&local_path, &remote_path, &transfer_id, &task_id)?;
-    validate_server_id(&server_id)?;
     let _permit = transfers
         .slots
         .acquire()
         .await
         .map_err(|_| CommandError::new("TRANSFER_QUEUE_CLOSED", "传输队列已经关闭"))?;
+    let _task_guard = transfers.acquire_task(&task_id)?;
+    let server_id = session_server_id(&manager, &session_id).await?;
     let sftp = open_sftp(&manager, &session_id).await?;
     let existing_target = sftp.metadata(remote_path.clone()).await.ok();
     if let Some(metadata) = &existing_target {
@@ -444,7 +487,7 @@ pub async fn sftp_upload(
         remote_path
     };
     let _target_guard =
-        transfers.acquire_target(TransferTargetKey::upload(&session_id, &target_path))?;
+        transfers.acquire_target(TransferTargetKey::upload(&server_id, &target_path))?;
     let mut source = File::open(&local_path)
         .await
         .map_err(|error| CommandError::new("LOCAL_FILE_OPEN_FAILED", error.to_string()))?;
@@ -453,7 +496,8 @@ pub async fn sftp_upload(
         .await
         .map_err(|error| CommandError::new("LOCAL_FILE_READ_FAILED", error.to_string()))?;
     let total = source_metadata.len();
-    let source_modified_at = modified_seconds(source_metadata.modified().ok());
+    let source_modified_at = modified_nanos(source_metadata.modified().ok());
+    let source_fingerprint = source_sample_fingerprint(&mut source, total).await?;
     transfers.cancelled.lock().await.remove(&transfer_id);
     let temporary_path = format!("{target_path}.liteshell-{task_id}.part");
     if let Ok(metadata) = sftp.metadata(temporary_path.clone()).await {
@@ -472,6 +516,7 @@ pub async fn sftp_upload(
         &normalize_remote_target(&target_path),
         total,
         source_modified_at,
+        &source_fingerprint,
         &normalize_remote_target(&temporary_path),
     );
     let resumed_from = if resume {
@@ -631,17 +676,17 @@ pub async fn sftp_download(
     local_path: String,
     transfer_id: String,
     task_id: String,
-    server_id: String,
     conflict_strategy: ConflictStrategy,
     resume: bool,
 ) -> Result<TransferResult, CommandError> {
     validate_transfer(&local_path, &remote_path, &transfer_id, &task_id)?;
-    validate_server_id(&server_id)?;
     let _permit = transfers
         .slots
         .acquire()
         .await
         .map_err(|_| CommandError::new("TRANSFER_QUEUE_CLOSED", "传输队列已经关闭"))?;
+    let _task_guard = transfers.acquire_task(&task_id)?;
+    let server_id = session_server_id(&manager, &session_id).await?;
     let sftp = open_sftp(&manager, &session_id).await?;
     let existing_target = fs::metadata(&local_path).await.ok();
     if let Some(metadata) = &existing_target {
@@ -668,7 +713,7 @@ pub async fn sftp_download(
         local_path
     };
     let _target_guard =
-        transfers.acquire_target(TransferTargetKey::download(&session_id, &target_path))?;
+        transfers.acquire_target(TransferTargetKey::download(&server_id, &target_path))?;
     let source_metadata = sftp
         .metadata(remote_path.clone())
         .await
@@ -679,11 +724,12 @@ pub async fn sftp_download(
         "远程源路径是目录，不能按文件下载",
     )?;
     let total = source_metadata.len();
-    let source_modified_at = modified_seconds(source_metadata.modified().ok());
+    let source_modified_at = modified_nanos(source_metadata.modified().ok());
     let mut source = sftp
         .open(remote_path.clone())
         .await
         .map_err(sftp_error("SFTP_DOWNLOAD_OPEN_FAILED"))?;
+    let source_fingerprint = source_sample_fingerprint(&mut source, total).await?;
     transfers.cancelled.lock().await.remove(&transfer_id);
     let temporary_path = format!("{target_path}.liteshell-{task_id}.part");
     if let Ok(metadata) = fs::metadata(&temporary_path).await {
@@ -702,6 +748,7 @@ pub async fn sftp_download(
         &normalize_local_target(&target_path),
         total,
         source_modified_at,
+        &source_fingerprint,
         &normalize_local_target(&temporary_path),
     );
     let resumed_from = if resume {
@@ -1270,10 +1317,76 @@ fn normalize_local_target(path: &str) -> String {
     }
 }
 
-fn modified_seconds(value: Option<std::time::SystemTime>) -> Option<u64> {
+const SOURCE_SAMPLE_SIZE: u64 = 64 * 1024;
+const FNV_OFFSET_1: u64 = 0xcbf29ce484222325;
+const FNV_OFFSET_2: u64 = 0x84222325cbf29ce4;
+const FNV_PRIME_1: u64 = 0x100000001b3;
+const FNV_PRIME_2: u64 = 0x9e3779b185ebca87;
+
+async fn source_sample_fingerprint<R>(source: &mut R, total: u64) -> Result<String, CommandError>
+where
+    R: AsyncRead + AsyncSeek + Unpin,
+{
+    let mut first = FNV_OFFSET_1;
+    let mut second = FNV_OFFSET_2;
+    update_sample_hash(&mut first, &total.to_le_bytes(), FNV_PRIME_1);
+    update_sample_hash(&mut second, &total.to_le_bytes(), FNV_PRIME_2);
+
+    let samples = if total <= SOURCE_SAMPLE_SIZE * 2 {
+        vec![(0, total)]
+    } else {
+        vec![
+            (0, SOURCE_SAMPLE_SIZE),
+            (total - SOURCE_SAMPLE_SIZE, SOURCE_SAMPLE_SIZE),
+        ]
+    };
+    let mut buffer = vec![0_u8; SOURCE_SAMPLE_SIZE as usize];
+    for (offset, length) in samples {
+        source
+            .seek(SeekFrom::Start(offset))
+            .await
+            .map_err(|error| {
+                CommandError::new("TRANSFER_SOURCE_FINGERPRINT_FAILED", error.to_string())
+            })?;
+        update_sample_hash(&mut first, &offset.to_le_bytes(), FNV_PRIME_1);
+        update_sample_hash(&mut second, &offset.to_le_bytes(), FNV_PRIME_2);
+        let mut remaining = length;
+        while remaining > 0 {
+            let requested = remaining.min(buffer.len() as u64) as usize;
+            let read = source
+                .read(&mut buffer[..requested])
+                .await
+                .map_err(|error| {
+                    CommandError::new("TRANSFER_SOURCE_FINGERPRINT_FAILED", error.to_string())
+                })?;
+            if read == 0 {
+                return Err(CommandError::new(
+                    "TRANSFER_SOURCE_FINGERPRINT_FAILED",
+                    "读取源文件采样内容时提前结束",
+                ));
+            }
+            update_sample_hash(&mut first, &buffer[..read], FNV_PRIME_1);
+            update_sample_hash(&mut second, &buffer[..read], FNV_PRIME_2);
+            remaining -= read as u64;
+        }
+    }
+    source.seek(SeekFrom::Start(0)).await.map_err(|error| {
+        CommandError::new("TRANSFER_SOURCE_FINGERPRINT_FAILED", error.to_string())
+    })?;
+    Ok(format!("{first:016x}{second:016x}"))
+}
+
+fn update_sample_hash(hash: &mut u64, bytes: &[u8], prime: u64) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(prime);
+    }
+}
+
+fn modified_nanos(value: Option<std::time::SystemTime>) -> Option<u64> {
     value
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs())
+        .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
 }
 
 fn unix_now() -> u64 {
@@ -1281,16 +1394,6 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
-}
-
-fn validate_server_id(server_id: &str) -> Result<(), CommandError> {
-    if server_id.trim().is_empty() || server_id.len() > 512 {
-        return Err(CommandError::new(
-            "INVALID_TRANSFER_SERVER",
-            "传输服务器标识无效",
-        ));
-    }
-    Ok(())
 }
 
 fn validate_task_id(task_id: &str) -> Result<(), CommandError> {
@@ -1386,6 +1489,7 @@ fn validate_resume_checkpoint(
         && saved.target_path == expected.target_path
         && saved.source_size == expected.source_size
         && saved.source_modified_at == expected.source_modified_at
+        && saved.source_fingerprint == expected.source_fingerprint
         && saved.temporary_path == expected.temporary_path;
     if !identity_matches {
         return Err(CommandError::new(
@@ -1405,6 +1509,7 @@ fn validate_resume_checkpoint(
 #[tauri::command]
 pub async fn sftp_list_transfer_checkpoints(
     app: AppHandle,
+    manager: State<'_, SessionManager>,
 ) -> Result<Vec<TransferCheckpoint>, CommandError> {
     let root = app
         .path()
@@ -1434,8 +1539,10 @@ pub async fn sftp_list_transfer_checkpoints(
         let Ok(content) = fs::read(&path).await else {
             continue;
         };
-        if let Ok(checkpoint) = serde_json::from_slice::<TransferCheckpoint>(&content) {
+        if let Ok(mut checkpoint) = serde_json::from_slice::<TransferCheckpoint>(&content) {
             if validate_task_id(&checkpoint.task_id).is_ok() {
+                checkpoint.available_session_id =
+                    matching_session_id(&manager, &checkpoint.server_id).await;
                 checkpoints.push(checkpoint);
             }
         }
@@ -1460,23 +1567,23 @@ pub async fn sftp_discard_transfer_checkpoint(
     manager: State<'_, SessionManager>,
     task_id: String,
     session_id: Option<String>,
-    server_id: Option<String>,
 ) -> Result<(), CommandError> {
     let checkpoint = load_transfer_checkpoint(&app, &task_id).await?;
     validate_checkpoint_temporary_path(&checkpoint)?;
     if checkpoint.direction == "upload" {
-        if server_id.as_deref() != Some(checkpoint.server_id.as_str()) {
-            return Err(CommandError::new(
-                "TRANSFER_DISCARD_SERVER_MISMATCH",
-                "当前连接与检查点所属服务器不匹配",
-            ));
-        }
         let session_id = session_id.ok_or_else(|| {
             CommandError::new(
                 "TRANSFER_DISCARD_SESSION_REQUIRED",
                 "删除远程临时文件前请重新连接对应服务器",
             )
         })?;
+        let current_server_id = session_server_id(&manager, &session_id).await?;
+        if current_server_id != checkpoint.server_id {
+            return Err(CommandError::new(
+                "TRANSFER_DISCARD_SERVER_MISMATCH",
+                "当前 SSH 会话与检查点所属服务器不匹配",
+            ));
+        }
         let sftp = open_sftp(&manager, &session_id).await?;
         if let Err(error) = sftp.remove_file(checkpoint.temporary_path.clone()).await {
             if !matches!(
@@ -1645,7 +1752,7 @@ mod tests {
     #[test]
     fn locks_the_same_transfer_target_until_guard_drops() {
         let manager = SftpTransferManager::default();
-        let key = TransferTargetKey::upload("session-a", "/srv/file.txt");
+        let key = TransferTargetKey::upload("server-a", "/srv/file.txt");
         let first = manager.acquire_target(key.clone()).unwrap();
         let second = manager.acquire_target(key.clone());
         assert_eq!(
@@ -1660,13 +1767,13 @@ mod tests {
     fn allows_different_transfer_targets() {
         let manager = SftpTransferManager::default();
         let _first = manager
-            .acquire_target(TransferTargetKey::upload("session-a", "/srv/a.txt"))
+            .acquire_target(TransferTargetKey::upload("server-a", "/srv/a.txt"))
             .unwrap();
         assert!(manager
-            .acquire_target(TransferTargetKey::upload("session-a", "/srv/b.txt"))
+            .acquire_target(TransferTargetKey::upload("server-a", "/srv/b.txt"))
             .is_ok());
         assert!(manager
-            .acquire_target(TransferTargetKey::download("session-a", "C:\\tmp\\a.txt"))
+            .acquire_target(TransferTargetKey::download("server-a", "C:\\tmp\\a.txt"))
             .is_ok());
     }
 
@@ -1736,6 +1843,7 @@ mod tests {
             "/tmp/target.txt",
             100,
             Some(10),
+            "fingerprint-a",
             "/tmp/target.txt.liteshell-task-1.part",
         );
         let mut saved = expected.clone();
@@ -1753,12 +1861,49 @@ mod tests {
                 .code,
             "TRANSFER_RESUME_SOURCE_CHANGED"
         );
+        let mut changed_content = expected.clone();
+        changed_content.source_fingerprint = "fingerprint-b".to_owned();
+        assert_eq!(
+            validate_resume_checkpoint(&saved, &changed_content, 75)
+                .unwrap_err()
+                .code,
+            "TRANSFER_RESUME_SOURCE_CHANGED"
+        );
         assert_eq!(
             validate_resume_checkpoint(&saved, &expected, 101)
                 .unwrap_err()
                 .code,
             "TRANSFER_RESUME_CHECKPOINT_INVALID"
         );
+    }
+
+    #[test]
+    fn locks_a_stable_task_id_until_guard_drops() {
+        let manager = SftpTransferManager::default();
+        let first = manager.acquire_task("task-a").unwrap();
+        assert_eq!(
+            manager.acquire_task("task-a").unwrap_err().code,
+            "TRANSFER_TASK_BUSY"
+        );
+        drop(first);
+        assert!(manager.acquire_task("task-a").is_ok());
+    }
+
+    #[tokio::test]
+    async fn sampled_fingerprint_detects_same_size_content_changes() {
+        let mut first = std::io::Cursor::new(vec![1_u8; 256 * 1024]);
+        let mut second_data = vec![1_u8; 256 * 1024];
+        second_data[0] = 2;
+        second_data[second_data.len() - 1] = 3;
+        let mut second = std::io::Cursor::new(second_data);
+
+        let first_fingerprint = source_sample_fingerprint(&mut first, 256 * 1024)
+            .await
+            .unwrap();
+        let second_fingerprint = source_sample_fingerprint(&mut second, 256 * 1024)
+            .await
+            .unwrap();
+        assert_ne!(first_fingerprint, second_fingerprint);
     }
 
     #[test]
@@ -1781,6 +1926,7 @@ mod tests {
             "C:\\tmp\\file.txt",
             10,
             Some(1),
+            "fingerprint-a",
             "C:\\tmp\\file.txt.liteshell-task-1.part",
         );
         assert!(validate_checkpoint_temporary_path(&checkpoint).is_ok());

@@ -139,10 +139,12 @@ export type TransferCheckpoint = {
   targetPath: string;
   sourceSize: number;
   sourceModifiedAt?: number;
+  sourceFingerprint: string;
   temporaryPath: string;
   transferred: number;
   createdAt: number;
   updatedAt: number;
+  availableSessionId?: string;
 };
 
 export type TransferEvent = {
@@ -251,7 +253,6 @@ export const uploadSftpFile = (request: {
   remotePath: string;
   transferId: string;
   taskId: string;
-  serverId: string;
   conflictStrategy: ConflictStrategy;
   resume: boolean;
 }) => invoke<TransferResult>("sftp_upload", request);
@@ -262,7 +263,6 @@ export const downloadSftpFile = (request: {
   localPath: string;
   transferId: string;
   taskId: string;
-  serverId: string;
   conflictStrategy: ConflictStrategy;
   resume: boolean;
 }) => invoke<TransferResult>("sftp_download", request);
@@ -276,8 +276,8 @@ export const listSftpTransferCheckpoints = () =>
 export const deleteSftpTransferCheckpoint = (taskId: string) =>
   invoke<void>("sftp_delete_transfer_checkpoint", { taskId });
 
-export const discardSftpTransferCheckpoint = (taskId: string, sessionId?: string, serverId?: string) =>
-  invoke<void>("sftp_discard_transfer_checkpoint", { taskId, sessionId, serverId });
+export const discardSftpTransferCheckpoint = (taskId: string, sessionId?: string) =>
+  invoke<void>("sftp_discard_transfer_checkpoint", { taskId, sessionId });
 
 export const getLocalDirectoryManifest = (path: string) =>
   invoke<LocalDirectoryManifest>("sftp_local_directory_manifest", { path });

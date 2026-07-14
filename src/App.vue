@@ -180,8 +180,8 @@ let monitorTimer: number | null = null;
 const terminalBuffers = new Map<string, string>();
 const textDecoder = new TextDecoder();
 type TransferTask =
-  | { taskId: string; serverId: string; direction: "upload"; sessionId: string; localPath: string; remotePath: string; conflictStrategy: ConflictStrategy; resume: boolean }
-  | { taskId: string; serverId: string; direction: "download"; sessionId: string; remotePath: string; localPath: string; conflictStrategy: ConflictStrategy; resume: boolean };
+  | { taskId: string; direction: "upload"; sessionId: string; localPath: string; remotePath: string; conflictStrategy: ConflictStrategy; resume: boolean }
+  | { taskId: string; direction: "download"; sessionId: string; remotePath: string; localPath: string; conflictStrategy: ConflictStrategy; resume: boolean };
 const transferTasks = new Map<string, TransferTask>();
 
 const visibleProfiles = computed(() => {
@@ -196,9 +196,8 @@ const memoryPercent = computed(() => percentage(systemMetrics.value?.memoryUsed,
 const swapPercent = computed(() => percentage(systemMetrics.value?.swapUsed, systemMetrics.value?.swapTotal));
 const networkScale = computed(() => Math.max(1024, ...networkRxHistory.value, ...networkTxHistory.value));
 const activeSession = computed(() => sessions.value.find((session) => session.id === activeSessionId.value));
-const serverIdForSession = (session: Session) => session.profileId ?? session.name;
 const checkpointSession = (checkpoint: TransferCheckpoint) =>
-  sessions.value.find((session) => session.connected && serverIdForSession(session) === checkpoint.serverId);
+  sessions.value.find((session) => session.connected && session.id === checkpoint.availableSessionId);
 const selectedRemoteFile = computed(() => selectedRemoteFiles.value.length === 1 ? selectedRemoteFiles.value[0] : null);
 const starred = computed(() => sftpBookmarks.value.includes(sftpPath.value));
 const displayedSftpEntries = computed(() => {
@@ -684,10 +683,9 @@ async function uploadFilePaths(paths: string[], sessionId = activeSessionId.valu
     await runWithConcurrency(tasks, async (task) => {
       const transferId = crypto.randomUUID();
       const taskId = crypto.randomUUID();
-      const serverId = serverIdForSession(session);
-      const request = { taskId, serverId, direction: "upload" as const, sessionId, ...task, resume: false };
+      const request = { taskId, direction: "upload" as const, sessionId, ...task, resume: false };
       transferTasks.set(transferId, request);
-      const result = await uploadSftpFile({ sessionId, transferId, taskId, serverId, ...task, resume: false });
+      const result = await uploadSftpFile({ sessionId, transferId, taskId, ...task, resume: false });
       if (result.skipped) transferTasks.delete(transferId);
     });
     await loadDirectory(sessionId, state.path, false);
@@ -739,11 +737,10 @@ async function uploadDirectoryPath(
     await runWithConcurrency(manifest.files, async (file) => {
       const transferId = crypto.randomUUID();
       const taskId = crypto.randomUUID();
-      const serverId = serverIdForSession(session);
       const remotePath = joinRemotePath(remoteRoot, file.relativePath);
-      const request = { taskId, serverId, direction: "upload" as const, sessionId, localPath: file.absolutePath, remotePath, conflictStrategy, resume: false };
+      const request = { taskId, direction: "upload" as const, sessionId, localPath: file.absolutePath, remotePath, conflictStrategy, resume: false };
       transferTasks.set(transferId, request);
-      const result = await uploadSftpFile({ sessionId, localPath: file.absolutePath, remotePath, transferId, taskId, serverId, conflictStrategy, resume: false });
+      const result = await uploadSftpFile({ sessionId, localPath: file.absolutePath, remotePath, transferId, taskId, conflictStrategy, resume: false });
       if (result.skipped) transferTasks.delete(transferId);
     });
     await loadDirectory(sessionId, state.path, false);
@@ -812,10 +809,9 @@ async function downloadOne(sessionId: string, remotePath: string, localPath: str
   const taskId = crypto.randomUUID();
   const session = sessions.value.find((item) => item.id === sessionId);
   if (!session) return;
-  const serverId = serverIdForSession(session);
-  const request = { taskId, serverId, direction: "download" as const, sessionId, remotePath, localPath, conflictStrategy, resume: false };
+  const request = { taskId, direction: "download" as const, sessionId, remotePath, localPath, conflictStrategy, resume: false };
   transferTasks.set(transferId, request);
-  const result = await downloadSftpFile({ sessionId, remotePath, localPath, transferId, taskId, serverId, conflictStrategy, resume: false });
+  const result = await downloadSftpFile({ sessionId, remotePath, localPath, transferId, taskId, conflictStrategy, resume: false });
   if (result.skipped) transferTasks.delete(transferId);
 }
 
@@ -856,7 +852,6 @@ async function runRecoveredTransfer(checkpoint: TransferCheckpoint, resume: bool
   const transferId = crypto.randomUUID();
   const common = {
     taskId: checkpoint.taskId,
-    serverId: checkpoint.serverId,
     sessionId: session.id,
     conflictStrategy: "overwrite" as ConflictStrategy,
     resume,
@@ -900,7 +895,7 @@ async function discardCheckpointTemporaryFile(checkpoint: TransferCheckpoint) {
     return;
   }
   try {
-    await discardSftpTransferCheckpoint(checkpoint.taskId, session?.id, session ? serverIdForSession(session) : undefined);
+    await discardSftpTransferCheckpoint(checkpoint.taskId, session?.id);
     await refreshTransferCheckpoints();
   } catch (error) {
     window.alert(describeCommandError(error));

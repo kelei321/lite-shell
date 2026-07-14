@@ -25,8 +25,35 @@ pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<String, SessionControl>>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionIdentity {
+    host: String,
+    port: u16,
+    username: String,
+    host_key_fingerprint: String,
+}
+
+impl SessionIdentity {
+    fn new(host: &str, port: u16, username: &str, host_key_fingerprint: &str) -> Self {
+        Self {
+            host: host.trim().to_lowercase(),
+            port,
+            username: username.to_owned(),
+            host_key_fingerprint: host_key_fingerprint.to_owned(),
+        }
+    }
+
+    fn server_id(&self) -> String {
+        format!(
+            "v1|{}|{}|{}|{}",
+            self.host, self.port, self.username, self.host_key_fingerprint
+        )
+    }
+}
+
 struct SessionControl {
     commands: mpsc::Sender<SessionCommand>,
+    identity: SessionIdentity,
 }
 
 enum SessionCommand {
@@ -174,7 +201,9 @@ struct HostKeyHandler {
 enum HostKeyObservation {
     #[default]
     None,
-    Known,
+    Known {
+        fingerprint: String,
+    },
     AcceptedNew {
         fingerprint: String,
         key: ssh_key::PublicKey,
@@ -208,7 +237,9 @@ impl client::Handler for HostKeyHandler {
         ) {
             Ok(true) => {
                 *self.observation.lock().expect("host observation poisoned") =
-                    HostKeyObservation::Known;
+                    HostKeyObservation::Known {
+                        fingerprint: fingerprint.clone(),
+                    };
                 Ok(true)
             }
             Ok(false) => {
@@ -360,11 +391,21 @@ async fn connect_inner(
 
     authenticate(&mut handle, &request.username, &request.auth).await?;
 
-    if let HostKeyObservation::AcceptedNew { fingerprint, key } = observation
+    let host_key_observation = observation
         .lock()
         .expect("host observation poisoned")
-        .clone()
-    {
+        .clone();
+    let host_key_fingerprint = match &host_key_observation {
+        HostKeyObservation::Known { fingerprint }
+        | HostKeyObservation::AcceptedNew { fingerprint, .. } => fingerprint.clone(),
+        _ => {
+            return Err(CommandError::new(
+                "HOST_KEY_IDENTITY_UNAVAILABLE",
+                "无法确认当前 SSH 会话的服务器身份",
+            ))
+        }
+    };
+    if let HostKeyObservation::AcceptedNew { fingerprint, key } = host_key_observation {
         if request.expected_host_fingerprint.as_deref() != Some(fingerprint.as_str()) {
             return Err(CommandError::host_key(
                 "HOST_KEY_CONFIRMATION_MISMATCH",
@@ -397,11 +438,18 @@ async fn connect_inner(
         .await
         .map_err(|error| CommandError::new("SHELL_REQUEST_FAILED", error.to_string()))?;
 
+    let identity = SessionIdentity::new(
+        &request.host,
+        request.port,
+        &request.username,
+        &host_key_fingerprint,
+    );
     let (commands, mut receiver) = mpsc::channel::<SessionCommand>(128);
     manager.sessions.write().await.insert(
         request.session_id.clone(),
         SessionControl {
             commands: commands.clone(),
+            identity,
         },
     );
 
@@ -566,6 +614,33 @@ async fn send_command(
         .map_err(|_| CommandError::new("SESSION_CLOSED", "SSH 会话已经关闭"))
 }
 
+pub(crate) async fn session_server_id(
+    manager: &SessionManager,
+    session_id: &str,
+) -> Result<String, CommandError> {
+    manager
+        .sessions
+        .read()
+        .await
+        .get(session_id)
+        .map(|control| control.identity.server_id())
+        .ok_or_else(|| CommandError::new("SESSION_NOT_FOUND", "SSH 会话不存在或已经断开"))
+}
+
+pub(crate) async fn matching_session_id(
+    manager: &SessionManager,
+    server_id: &str,
+) -> Option<String> {
+    manager
+        .sessions
+        .read()
+        .await
+        .iter()
+        .find_map(|(session_id, control)| {
+            (control.identity.server_id() == server_id).then(|| session_id.clone())
+        })
+}
+
 pub(crate) async fn open_sftp(
     manager: &SessionManager,
     session_id: &str,
@@ -720,5 +795,19 @@ mod tests {
                 .code,
             "INVALID_PORT"
         );
+    }
+
+    #[test]
+    fn derives_server_identity_from_verified_connection_details() {
+        let first = SessionIdentity::new("EXAMPLE.com", 22, "root", "SHA256:first");
+        let same = SessionIdentity::new("example.COM", 22, "root", "SHA256:first");
+        let different_port = SessionIdentity::new("example.com", 2222, "root", "SHA256:first");
+        let different_user = SessionIdentity::new("example.com", 22, "admin", "SHA256:first");
+        let different_key = SessionIdentity::new("example.com", 22, "root", "SHA256:second");
+
+        assert_eq!(first.server_id(), same.server_id());
+        assert_ne!(first.server_id(), different_port.server_id());
+        assert_ne!(first.server_id(), different_user.server_id());
+        assert_ne!(first.server_id(), different_key.server_id());
     }
 }
