@@ -123,10 +123,25 @@ export type DirectoryListing = {
   entries: SftpEntry[];
 };
 
-export type LocalDirectoryManifest = {
+export type RecursiveScanSummary = {
+  fileCount: number;
+  directoryCount: number;
+  totalSize: number;
+  skippedLinks: number;
+  skippedUnsupported: number;
+  warnings: string[];
+};
+
+export type LocalDirectoryManifest = RecursiveScanSummary & {
   rootName: string;
   directories: string[];
   files: Array<{ absolutePath: string; relativePath: string; size: number }>;
+};
+
+export type RemoteDirectoryManifest = RecursiveScanSummary & {
+  rootPath: string;
+  directories: string[];
+  files: Array<{ remotePath: string; relativePath: string; size: number }>;
 };
 
 export type TransferCheckpoint = {
@@ -279,8 +294,11 @@ export const deleteSftpTransferCheckpoint = (taskId: string) =>
 export const discardSftpTransferCheckpoint = (taskId: string, sessionId?: string) =>
   invoke<void>("sftp_discard_transfer_checkpoint", { taskId, sessionId });
 
-export const getLocalDirectoryManifest = (path: string) =>
-  invoke<LocalDirectoryManifest>("sftp_local_directory_manifest", { path });
+export const getLocalDirectoryManifest = (path: string, scanId: string) =>
+  invoke<LocalDirectoryManifest>("sftp_local_directory_manifest", { path, scanId });
+
+export const getRemoteDirectoryManifest = (sessionId: string, path: string, scanId: string) =>
+  invoke<RemoteDirectoryManifest>("sftp_remote_directory_manifest", { sessionId, path, scanId });
 
 export const prepareLocalDirectory = (path: string, conflictStrategy: ConflictStrategy = "overwrite") =>
   invoke<TransferResult>("sftp_prepare_local_directory", { path, conflictStrategy });

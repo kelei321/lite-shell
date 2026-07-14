@@ -187,6 +187,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid #43a8e8; outline-
 .checkpoint-queue { max-height: 178px; }
 .checkpoint-queue .upload-strip { grid-template-columns: minmax(170px, auto) minmax(70px, 1fr) 132px 48px repeat(4, max-content); }
 .checkpoint-queue .upload-strip > button:disabled { color: #5d7079; cursor: not-allowed; }
+.sftp-scan-status, .sftp-notice { padding: 7px 12px; border-bottom: 1px solid #345364; background: #172f3b; color: #9fd6f1; font-size: 11px; }
+.sftp-scan-status { display: flex; align-items: center; justify-content: space-between; }
+.sftp-scan-status button { border: 0; background: transparent; color: #79bfe8; cursor: pointer; }
 .sftp-error { padding: 7px 12px; color: #ffabb1; background: #38232a; border-bottom: 1px solid #65404a; font-size: 11px; }
 .file-table { min-height: 0; flex: 1; overflow: auto; }
 .file-row { width: 100%; min-width: 760px; height: 41px; display: grid; grid-template-columns: minmax(250px, 1.2fr) minmax(130px, .55fr) minmax(220px, .75fr) minmax(150px, .5fr); align-items: center; border: 0; border-bottom: 1px solid #233a45; background: transparent; color: #bac7ce; text-align: left; font-size: 12px; }

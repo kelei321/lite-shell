@@ -157,10 +157,7 @@ async fn build_local_directory_manifest(
 
             if is_local_link_or_reparse(&metadata) {
                 summary.skipped_links += 1;
-                push_warning(
-                    &mut summary,
-                    format!("已跳过链接或 junction：{relative}"),
-                );
+                push_warning(&mut summary, format!("已跳过链接或 junction：{relative}"));
                 continue;
             }
 
@@ -377,10 +374,7 @@ fn enforce_directory_count(count: u64) -> Result<(), CommandError> {
     }
 }
 
-fn add_file_to_summary(
-    summary: &mut RecursiveScanSummary,
-    size: u64,
-) -> Result<(), CommandError> {
+fn add_file_to_summary(summary: &mut RecursiveScanSummary, size: u64) -> Result<(), CommandError> {
     let next_count = summary.file_count.saturating_add(1);
     if next_count > MAX_RECURSIVE_FILES {
         return Err(CommandError::new(
@@ -388,9 +382,10 @@ fn add_file_to_summary(
             format!("文件数量超过安全上限 {MAX_RECURSIVE_FILES}"),
         ));
     }
-    let next_size = summary.total_size.checked_add(size).ok_or_else(|| {
-        CommandError::new("RECURSIVE_SIZE_LIMIT", "目录累计大小超过安全上限")
-    })?;
+    let next_size = summary
+        .total_size
+        .checked_add(size)
+        .ok_or_else(|| CommandError::new("RECURSIVE_SIZE_LIMIT", "目录累计大小超过安全上限"))?;
     if next_size > MAX_RECURSIVE_TOTAL_SIZE {
         return Err(CommandError::new(
             "RECURSIVE_SIZE_LIMIT",
@@ -406,9 +401,7 @@ fn push_warning(summary: &mut RecursiveScanSummary, warning: String) {
     if summary.warnings.len() < MAX_SCAN_WARNINGS {
         summary.warnings.push(warning);
     } else if summary.warnings.len() == MAX_SCAN_WARNINGS {
-        summary
-            .warnings
-            .push("更多跳过项未逐条显示".to_owned());
+        summary.warnings.push("更多跳过项未逐条显示".to_owned());
     }
 }
 
@@ -528,7 +521,10 @@ mod tests {
     fn protects_remote_root_boundaries() {
         assert!(remote_path_within_root("/srv/root", "/srv/root/file.txt"));
         assert!(remote_path_within_root("/srv/root", "/srv/root"));
-        assert!(!remote_path_within_root("/srv/root", "/srv/root-other/file.txt"));
+        assert!(!remote_path_within_root(
+            "/srv/root",
+            "/srv/root-other/file.txt"
+        ));
         assert!(!remote_path_within_root("/srv/root", "/etc/passwd"));
     }
 
@@ -563,10 +559,8 @@ mod tests {
 
     #[tokio::test]
     async fn stops_a_cancelled_recursive_scan() {
-        let root = std::env::temp_dir().join(format!(
-            "liteshell-recursive-cancel-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("liteshell-recursive-cancel-{}", std::process::id()));
         fs::create_dir_all(&root).await.unwrap();
         let transfers = SftpTransferManager::default();
         transfers.begin_operation("scan-cancel").await;
@@ -585,10 +579,8 @@ mod tests {
     async fn skips_local_symbolic_links() {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join(format!(
-            "liteshell-recursive-link-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("liteshell-recursive-link-{}", std::process::id()));
         fs::create_dir_all(root.join("real")).await.unwrap();
         symlink(root.join("real"), root.join("linked")).unwrap();
         let transfers = SftpTransferManager::default();
