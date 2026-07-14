@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -40,6 +40,18 @@ import {
   type TransferEvent,
 } from "./services/ssh";
 import {
+  beginSftpDirectoryRequest,
+  bindSftpEntries,
+  createSftpSessionState,
+  ensureSftpSessionState,
+  finishSftpDirectoryRequest,
+  isCurrentSftpDirectoryRequest,
+  removeSftpSessionState,
+  selectionBelongsToSession,
+  type SessionSftpEntry,
+  type SftpSessionState,
+} from "./sftp/session-state";
+import {
   IconAdjustmentsHorizontal,
   IconArrowDown,
   IconArrowLeft,
@@ -74,16 +86,48 @@ const search = ref("");
 const statusExpanded = ref(true);
 const sidebarCollapsed = ref(false);
 const selectedTool = ref<"files" | "bookmarks" | "history">("files");
-const sftpPath = ref(".");
-const sftpEntries = ref<SftpEntry[]>([]);
-const sftpLoading = ref(false);
-const sftpError = ref("");
-const selectedRemoteFiles = ref<SftpEntry[]>([]);
+const sftpStates = reactive(new Map<string, SftpSessionState>());
+const emptySftpState = reactive(createSftpSessionState(""));
+const activeSftpState = computed(() => activeSessionId.value
+  ? ensureSftpSessionState(sftpStates, activeSessionId.value)
+  : emptySftpState);
+const sftpPath = computed({
+  get: () => activeSftpState.value.path,
+  set: (value: string) => { activeSftpState.value.path = value; },
+});
+const sftpEntries = computed({
+  get: () => activeSftpState.value.entries,
+  set: (value: SessionSftpEntry[]) => { activeSftpState.value.entries = value; },
+});
+const sftpLoading = computed({
+  get: () => activeSftpState.value.loading,
+  set: (value: boolean) => { activeSftpState.value.loading = value; },
+});
+const sftpError = computed({
+  get: () => activeSftpState.value.error,
+  set: (value: string) => { activeSftpState.value.error = value; },
+});
+const selectedRemoteFiles = computed({
+  get: () => activeSftpState.value.selectedEntries,
+  set: (value: SessionSftpEntry[]) => { activeSftpState.value.selectedEntries = value; },
+});
 const transfers = ref<TransferEvent[]>([]);
-const sftpHistory = ref<string[]>([]);
-const sftpHistoryIndex = ref(-1);
-const sftpBookmarks = ref<string[]>([]);
-const sftpRecentPaths = ref<string[]>([]);
+const sftpHistory = computed({
+  get: () => activeSftpState.value.history,
+  set: (value: string[]) => { activeSftpState.value.history = value; },
+});
+const sftpHistoryIndex = computed({
+  get: () => activeSftpState.value.historyIndex,
+  set: (value: number) => { activeSftpState.value.historyIndex = value; },
+});
+const sftpBookmarks = computed({
+  get: () => activeSftpState.value.bookmarks,
+  set: (value: string[]) => { activeSftpState.value.bookmarks = value; },
+});
+const sftpRecentPaths = computed({
+  get: () => activeSftpState.value.recentPaths,
+  set: (value: string[]) => { activeSftpState.value.recentPaths = value; },
+});
 const sftpSearch = ref("");
 const sftpSortKey = ref<"name" | "size" | "modifiedAt">("name");
 const sftpSortAscending = ref(true);
@@ -184,46 +228,62 @@ function resolveConflict(strategy: ConflictStrategy | "cancel") {
   conflictRequest.value = null;
 }
 
-function sftpStorageScope() {
-  const session = activeSession.value;
-  return session?.profileId ?? session?.name ?? "default";
+function sftpStorageScope(sessionId: string) {
+  const session = sessions.value.find((item) => item.id === sessionId);
+  return session?.profileId ?? session?.name ?? sessionId ?? "default";
 }
 
-function readSftpStorage(key: string) {
+function readSftpStorage(sessionId: string, key: string) {
   try {
     const all = JSON.parse(localStorage.getItem(key) ?? "{}") as Record<string, string[]>;
-    return all[sftpStorageScope()] ?? [];
+    return all[sftpStorageScope(sessionId)] ?? [];
   } catch {
     return [];
   }
 }
 
-function writeSftpStorage(key: string, values: string[]) {
+function writeSftpStorage(sessionId: string, key: string, values: string[]) {
+  if (!sessionId) return;
   try {
     const all = JSON.parse(localStorage.getItem(key) ?? "{}") as Record<string, string[]>;
-    all[sftpStorageScope()] = values;
+    all[sftpStorageScope(sessionId)] = values;
     localStorage.setItem(key, JSON.stringify(all));
   } catch {
     // 存储不可用时仍允许当前会话继续使用 SFTP。
   }
 }
 
-function loadSftpStorage() {
-  sftpBookmarks.value = readSftpStorage("liteshell.sftp.bookmarks.v1");
-  sftpRecentPaths.value = readSftpStorage("liteshell.sftp.history.v1");
+function loadSftpStorage(sessionId: string) {
+  if (!sessionId) return;
+  const state = ensureSftpSessionState(sftpStates, sessionId);
+  state.bookmarks = readSftpStorage(sessionId, "liteshell.sftp.bookmarks.v1");
+  state.recentPaths = readSftpStorage(sessionId, "liteshell.sftp.history.v1");
 }
 
 function toggleSftpBookmark() {
-  const path = sftpPath.value;
-  sftpBookmarks.value = starred.value
-    ? sftpBookmarks.value.filter((item) => item !== path)
-    : [path, ...sftpBookmarks.value.filter((item) => item !== path)].slice(0, 50);
-  writeSftpStorage("liteshell.sftp.bookmarks.v1", sftpBookmarks.value);
+  const sessionId = activeSessionId.value;
+  if (!sessionId) return;
+  const state = ensureSftpSessionState(sftpStates, sessionId);
+  state.bookmarks = state.bookmarks.includes(state.path)
+    ? state.bookmarks.filter((item) => item !== state.path)
+    : [state.path, ...state.bookmarks.filter((item) => item !== state.path)].slice(0, 50);
+  writeSftpStorage(sessionId, "liteshell.sftp.bookmarks.v1", state.bookmarks);
+}
+
+function removeSftpBookmark(path: string) {
+  const sessionId = activeSessionId.value;
+  if (!sessionId) return;
+  const state = ensureSftpSessionState(sftpStates, sessionId);
+  state.bookmarks = state.bookmarks.filter((item) => item !== path);
+  writeSftpStorage(sessionId, "liteshell.sftp.bookmarks.v1", state.bookmarks);
 }
 
 function clearSftpHistory() {
-  sftpRecentPaths.value = [];
-  writeSftpStorage("liteshell.sftp.history.v1", []);
+  const sessionId = activeSessionId.value;
+  if (!sessionId) return;
+  const state = ensureSftpSessionState(sftpStates, sessionId);
+  state.recentPaths = [];
+  writeSftpStorage(sessionId, "liteshell.sftp.history.v1", []);
 }
 
 function openProfile(profile: ConnectionProfile) {
@@ -258,6 +318,7 @@ async function closeSession(id: string) {
   const index = sessions.value.findIndex((session) => session.id === id);
   sessions.value = sessions.value.filter((session) => session.id !== id);
   terminalBuffers.delete(id);
+  removeSftpSessionState(sftpStates, id);
   if (isTauri()) await disconnectSsh(id).catch(() => undefined);
   if (activeSessionId.value === id) {
     activeSessionId.value = sessions.value[Math.max(0, index - 1)]?.id ?? "";
@@ -371,7 +432,7 @@ async function submitConnection(expectedFingerprint?: string) {
     connectionForm.value.passphrase = "";
     showConnectDialog.value = false;
     pendingFingerprint.value = null;
-    void loadDirectory(".");
+    void loadDirectory(request.sessionId, ".");
   } catch (error) {
     connectError.value = describeCommandError(error);
     const session = sessions.value.find((item) => item.id === request.sessionId);
@@ -422,6 +483,7 @@ async function connectManagedProfiles(items: ConnectionProfile[]) {
           session.state = "connected";
         }
         terminalBuffers.set(sessionId, "");
+        void loadDirectory(sessionId, ".");
       } catch (cause) {
         const session = sessions.value.find((item) => item.id === sessionId);
         if (session) session.state = "error";
@@ -475,39 +537,51 @@ function renderActiveTerminal() {
   fitAddon?.fit();
 }
 
-async function loadDirectory(path: string, recordHistory = true) {
-  const session = activeSession.value;
+async function loadDirectory(sessionId: string, path: string, recordHistory = true) {
+  const session = sessions.value.find((item) => item.id === sessionId);
+  const state = ensureSftpSessionState(sftpStates, sessionId);
   if (!session?.connected || !isTauri()) {
-    sftpEntries.value = [];
-    sftpError.value = "请先建立 SSH 连接";
+    state.entries = [];
+    state.error = "请先建立 SSH 连接";
+    state.loading = false;
     return;
   }
-  sftpLoading.value = true;
-  sftpError.value = "";
-  selectedRemoteFiles.value = [];
+
+  const requestVersion = beginSftpDirectoryRequest(state);
   try {
-    const listing = await listSftpDirectory(session.id, path);
-    sftpPath.value = listing.path;
-    sftpEntries.value = listing.entries;
-    if (recordHistory && sftpHistory.value[sftpHistoryIndex.value] !== listing.path) {
-      sftpHistory.value = sftpHistory.value.slice(0, sftpHistoryIndex.value + 1);
-      sftpHistory.value.push(listing.path);
-      sftpHistoryIndex.value = sftpHistory.value.length - 1;
-      sftpRecentPaths.value = [listing.path, ...sftpRecentPaths.value.filter((item) => item !== listing.path)].slice(0, 50);
-      writeSftpStorage("liteshell.sftp.history.v1", sftpRecentPaths.value);
+    const listing = await listSftpDirectory(sessionId, path);
+    if (!isCurrentSftpDirectoryRequest(sftpStates, state, requestVersion)) return;
+    state.path = listing.path;
+    state.entries = bindSftpEntries(sessionId, listing.entries);
+    if (recordHistory && state.history[state.historyIndex] !== listing.path) {
+      state.history = state.history.slice(0, state.historyIndex + 1);
+      state.history.push(listing.path);
+      state.historyIndex = state.history.length - 1;
+      state.recentPaths = [listing.path, ...state.recentPaths.filter((item) => item !== listing.path)].slice(0, 50);
+      writeSftpStorage(sessionId, "liteshell.sftp.history.v1", state.recentPaths);
     }
   } catch (error) {
-    sftpError.value = describeCommandError(error);
+    if (isCurrentSftpDirectoryRequest(sftpStates, state, requestVersion)) {
+      state.error = describeCommandError(error);
+    }
   } finally {
-    sftpLoading.value = false;
+    finishSftpDirectoryRequest(sftpStates, state, requestVersion);
   }
 }
 
+function loadActiveDirectory(path: string, recordHistory = true) {
+  const sessionId = activeSessionId.value;
+  if (sessionId) void loadDirectory(sessionId, path, recordHistory);
+}
+
 function navigateHistory(offset: number) {
-  const next = sftpHistoryIndex.value + offset;
-  if (next < 0 || next >= sftpHistory.value.length) return;
-  sftpHistoryIndex.value = next;
-  void loadDirectory(sftpHistory.value[next], false);
+  const sessionId = activeSessionId.value;
+  if (!sessionId) return;
+  const state = ensureSftpSessionState(sftpStates, sessionId);
+  const next = state.historyIndex + offset;
+  if (next < 0 || next >= state.history.length) return;
+  state.historyIndex = next;
+  void loadDirectory(sessionId, state.history[next], false);
 }
 
 function parentPath(path: string) {
@@ -516,18 +590,22 @@ function parentPath(path: string) {
   return normalized.slice(0, normalized.lastIndexOf("/")) || "/";
 }
 
-function openSftpEntry(entry: SftpEntry) {
-  selectedRemoteFiles.value = [entry];
-  if (entry.kind === "directory") void loadDirectory(entry.path);
+function openSftpEntry(entry: SessionSftpEntry) {
+  const state = sftpStates.get(entry.sessionId);
+  if (!state || activeSessionId.value !== entry.sessionId) return;
+  state.selectedEntries = [entry];
+  if (entry.kind === "directory") void loadDirectory(entry.sessionId, entry.path);
 }
 
-function selectRemoteEntry(entry: SftpEntry, event: MouseEvent) {
+function selectRemoteEntry(entry: SessionSftpEntry, event: MouseEvent) {
+  const state = sftpStates.get(entry.sessionId);
+  if (!state || activeSessionId.value !== entry.sessionId) return;
   if (event.ctrlKey || event.metaKey) {
-    selectedRemoteFiles.value = selectedRemoteFiles.value.some((item) => item.path === entry.path)
-      ? selectedRemoteFiles.value.filter((item) => item.path !== entry.path)
-      : [...selectedRemoteFiles.value, entry];
+    state.selectedEntries = state.selectedEntries.some((item) => item.path === entry.path)
+      ? state.selectedEntries.filter((item) => item.path !== entry.path)
+      : [...state.selectedEntries, entry];
   } else {
-    selectedRemoteFiles.value = [entry];
+    state.selectedEntries = [entry];
   }
 }
 
@@ -561,22 +639,25 @@ async function runWithConcurrency<T>(items: T[], worker: (item: T) => Promise<vo
 async function startUpload() {
   const session = activeSession.value;
   if (!session?.connected) return;
+  const sessionId = session.id;
   const selected = await open({ multiple: true, directory: false, title: "选择要上传的文件" });
   if (!selected) return;
   const paths = Array.isArray(selected) ? selected : [selected];
-  await uploadFilePaths(paths);
+  await uploadFilePaths(paths, sessionId);
 }
 
-async function uploadFilePaths(paths: string[]) {
-  const session = activeSession.value;
+async function uploadFilePaths(paths: string[], sessionId = activeSessionId.value) {
+  const session = sessions.value.find((item) => item.id === sessionId);
   if (!session?.connected) return;
+  const state = ensureSftpSessionState(sftpStates, sessionId);
+  const targetDirectory = state.path;
   const tasks: Array<{ localPath: string; remotePath: string; conflictStrategy: ConflictStrategy }> = [];
   let batchStrategy: ConflictStrategy | null = null;
   for (const localPath of paths) {
     const fileName = localPath.split(/[\\/]/).pop();
     if (!fileName) continue;
-    const remotePath = joinRemotePath(sftpPath.value, fileName);
-    const exists = sftpEntries.value.some((entry) => entry.name === fileName);
+    const remotePath = joinRemotePath(targetDirectory, fileName);
+    const exists = state.entries.some((entry) => entry.name === fileName);
     let conflictStrategy: ConflictStrategy = "overwrite";
     if (exists) {
       if (batchStrategy) conflictStrategy = batchStrategy;
@@ -593,69 +674,78 @@ async function uploadFilePaths(paths: string[]) {
   try {
     await runWithConcurrency(tasks, async (task) => {
       const transferId = crypto.randomUUID();
-      const request = { direction: "upload" as const, sessionId: session.id, ...task, resume: false };
+      const request = { direction: "upload" as const, sessionId, ...task, resume: false };
       transferTasks.set(transferId, request);
-      const result = await uploadSftpFile({ sessionId: session.id, transferId, ...task, resume: false });
+      const result = await uploadSftpFile({ sessionId, transferId, ...task, resume: false });
       if (result.skipped) transferTasks.delete(transferId);
     });
-    await loadDirectory(sftpPath.value, false);
+    await loadDirectory(sessionId, state.path, false);
   } catch (error) {
-    sftpError.value = describeCommandError(error);
+    state.error = describeCommandError(error);
   }
 }
 
 async function startUploadDirectory() {
   const session = activeSession.value;
   if (!session?.connected) return;
+  const sessionId = session.id;
   const localPath = await open({ directory: true, multiple: false, title: "选择要上传的文件夹" });
   if (!localPath || Array.isArray(localPath)) return;
-  await uploadDirectoryPath(localPath);
+  await uploadDirectoryPath(localPath, undefined, sessionId);
 }
 
-async function uploadDirectoryPath(localPath: string, knownManifest?: LocalDirectoryManifest) {
-  const session = activeSession.value;
+async function uploadDirectoryPath(
+  localPath: string,
+  knownManifest?: LocalDirectoryManifest,
+  sessionId = activeSessionId.value,
+) {
+  const session = sessions.value.find((item) => item.id === sessionId);
   if (!session?.connected) return;
+  const state = ensureSftpSessionState(sftpStates, sessionId);
+  const targetDirectory = state.path;
   try {
     const manifest = knownManifest ?? await getLocalDirectoryManifest(localPath);
-    let remoteRoot = joinRemotePath(sftpPath.value, manifest.rootName);
-    const exists = sftpEntries.value.some((entry) => entry.path === remoteRoot || entry.name === manifest.rootName);
+    let remoteRoot = joinRemotePath(targetDirectory, manifest.rootName);
+    const exists = state.entries.some((entry) => entry.path === remoteRoot || entry.name === manifest.rootName);
     let conflictStrategy: ConflictStrategy = "overwrite";
     if (exists) {
       const choice = await requestConflict(manifest.rootName);
       if (choice.strategy === "cancel" || choice.strategy === "skip") return;
       conflictStrategy = choice.strategy;
       if (choice.strategy === "rename") {
-        const names = new Set(sftpEntries.value.map((entry) => entry.name));
+        const names = new Set(state.entries.map((entry) => entry.name));
         let index = 1;
         let name = `${manifest.rootName} (${index})`;
         while (names.has(name)) name = `${manifest.rootName} (${++index})`;
-        remoteRoot = joinRemotePath(sftpPath.value, name);
+        remoteRoot = joinRemotePath(targetDirectory, name);
         conflictStrategy = "overwrite";
       }
     }
-    await createSftpDirectory(session.id, remoteRoot);
+    await createSftpDirectory(sessionId, remoteRoot);
     for (const directory of manifest.directories) {
-      await createSftpDirectory(session.id, joinRemotePath(remoteRoot, directory));
+      await createSftpDirectory(sessionId, joinRemotePath(remoteRoot, directory));
     }
     await runWithConcurrency(manifest.files, async (file) => {
       const transferId = crypto.randomUUID();
       const remotePath = joinRemotePath(remoteRoot, file.relativePath);
-      const request = { direction: "upload" as const, sessionId: session.id, localPath: file.absolutePath, remotePath, conflictStrategy, resume: false };
+      const request = { direction: "upload" as const, sessionId, localPath: file.absolutePath, remotePath, conflictStrategy, resume: false };
       transferTasks.set(transferId, request);
-      const result = await uploadSftpFile({ sessionId: session.id, localPath: file.absolutePath, remotePath, transferId, conflictStrategy, resume: false });
+      const result = await uploadSftpFile({ sessionId, localPath: file.absolutePath, remotePath, transferId, conflictStrategy, resume: false });
       if (result.skipped) transferTasks.delete(transferId);
     });
-    await loadDirectory(sftpPath.value, false);
+    await loadDirectory(sessionId, state.path, false);
   } catch (error) {
-    sftpError.value = describeCommandError(error);
+    state.error = describeCommandError(error);
   }
 }
 
 async function startDownload() {
-  const session = activeSession.value;
-  const selected = selectedRemoteFiles.value;
-  if (!session?.connected || !selected.length) {
-    sftpError.value = "请先选择要下载的文件或文件夹";
+  const sessionId = activeSessionId.value;
+  const state = sftpStates.get(sessionId);
+  const selected = state ? [...state.selectedEntries] : [];
+  const session = sessions.value.find((item) => item.id === sessionId);
+  if (!state || !session?.connected || !selectionBelongsToSession(selected, sessionId)) {
+    if (state) state.error = "请先选择要下载的文件或文件夹";
     return;
   }
   if (selected.length === 1 && selected[0].kind !== "directory") {
@@ -663,9 +753,9 @@ async function startDownload() {
     const localPath = await save({ title: "保存远程文件", defaultPath: item.name });
     if (!localPath) return;
     try {
-      await downloadOne(session.id, item.path, localPath, "overwrite");
+      await downloadOne(sessionId, item.path, localPath, "overwrite");
     } catch (error) {
-      sftpError.value = describeCommandError(error);
+      state.error = describeCommandError(error);
     }
     return;
   }
@@ -686,7 +776,7 @@ async function startDownload() {
       const pending = [{ remotePath: item.path, localPath: preparedRoot.path }];
       while (pending.length) {
         const directory = pending.shift()!;
-        const listing = await listSftpDirectory(session.id, directory.remotePath);
+        const listing = await listSftpDirectory(sessionId, directory.remotePath);
         for (const child of listing.entries) {
           const localPath = joinLocalPath(directory.localPath, child.name);
           if (child.kind === "directory") {
@@ -698,9 +788,9 @@ async function startDownload() {
         }
       }
     }
-    await runWithConcurrency(downloads, (item) => downloadOne(session.id, item.remotePath, item.localPath, batchConflictStrategy));
+    await runWithConcurrency(downloads, (item) => downloadOne(sessionId, item.remotePath, item.localPath, batchConflictStrategy));
   } catch (error) {
-    sftpError.value = describeCommandError(error);
+    state.error = describeCommandError(error);
   }
 }
 
@@ -723,8 +813,8 @@ function handleTransfer(event: TransferEvent) {
   }
   else transfers.value.push(event);
   if (event.state === "completed") transferTasks.delete(event.transferId);
-  if (event.state === "failed" && event.sessionId === activeSessionId.value) {
-    sftpError.value = event.message ?? "文件传输失败";
+  if (event.state === "failed") {
+    ensureSftpSessionState(sftpStates, event.sessionId).error = event.message ?? "文件传输失败";
   }
 }
 
@@ -742,7 +832,7 @@ function clearFinishedTransfers() {
 async function cancelTransfer(item: TransferEvent) {
   if (item.state !== "running") return;
   await cancelSftpTransfer(item.transferId).catch((error) => {
-    sftpError.value = describeCommandError(error);
+    ensureSftpSessionState(sftpStates, item.sessionId).error = describeCommandError(error);
   });
 }
 
@@ -751,52 +841,66 @@ async function retryTransfer(item: TransferEvent) {
   if (!task || item.state === "running") return;
   const transferId = crypto.randomUUID();
   transferTasks.set(transferId, task);
+  const state = ensureSftpSessionState(sftpStates, task.sessionId);
   try {
     if (task.direction === "upload") {
       await uploadSftpFile({ ...task, transferId, resume: true });
-      await loadDirectory(sftpPath.value, false);
+      await loadDirectory(task.sessionId, state.path, false);
     } else {
       await downloadSftpFile({ ...task, transferId, resume: true });
     }
   } catch (error) {
-    sftpError.value = describeCommandError(error);
+    state.error = describeCommandError(error);
   }
 }
 
 async function createRemoteDirectory() {
-  const session = activeSession.value;
+  const sessionId = activeSessionId.value;
+  const session = sessions.value.find((item) => item.id === sessionId);
   if (!session?.connected) return;
+  const state = ensureSftpSessionState(sftpStates, sessionId);
   const name = window.prompt("新建目录名称");
   if (!name?.trim() || /[\\/]/.test(name)) {
-    if (name) sftpError.value = "目录名称不能包含路径分隔符";
+    if (name) state.error = "目录名称不能包含路径分隔符";
     return;
   }
+  if (activeSessionId.value !== sessionId) return;
   try {
-    await createSftpDirectory(session.id, joinRemotePath(sftpPath.value, name.trim()));
-    await loadDirectory(sftpPath.value, false);
+    await createSftpDirectory(sessionId, joinRemotePath(state.path, name.trim()));
+    await loadDirectory(sessionId, state.path, false);
   } catch (error) {
-    sftpError.value = describeCommandError(error);
+    state.error = describeCommandError(error);
   }
 }
 
 async function renameRemoteEntry() {
-  const session = activeSession.value;
   const selected = selectedRemoteFile.value;
-  if (!session?.connected || !selected) return;
+  if (!selected) return;
+  const sessionId = selected.sessionId;
+  const session = sessions.value.find((item) => item.id === sessionId);
+  const state = sftpStates.get(sessionId);
+  if (!session?.connected || !state || activeSessionId.value !== sessionId) return;
   const name = window.prompt("新的名称", selected.name);
   if (!name?.trim() || name === selected.name || /[\\/]/.test(name)) return;
+  if (activeSessionId.value !== sessionId || !state.selectedEntries.some((entry) => entry.path === selected.path)) {
+    state.error = "会话或选择已经变化，请重新选择后操作";
+    return;
+  }
   try {
-    await renameSftpEntry(session.id, selected.path, joinRemotePath(sftpPath.value, name.trim()));
-    await loadDirectory(sftpPath.value, false);
+    await renameSftpEntry(sessionId, selected.path, joinRemotePath(state.path, name.trim()));
+    await loadDirectory(sessionId, state.path, false);
   } catch (error) {
-    sftpError.value = describeCommandError(error);
+    state.error = describeCommandError(error);
   }
 }
 
 async function deleteRemoteEntry() {
-  const session = activeSession.value;
   const selected = selectedRemoteFile.value;
-  if (!session?.connected || !selected) return;
+  if (!selected) return;
+  const sessionId = selected.sessionId;
+  const session = sessions.value.find((item) => item.id === sessionId);
+  const state = sftpStates.get(sessionId);
+  if (!session?.connected || !state || activeSessionId.value !== sessionId) return;
   const confirmed = await ask(`确定删除“${selected.name}”吗？此操作无法撤销。`, {
     title: selected.kind === "directory" ? "删除远程目录" : "删除远程文件",
     kind: "warning",
@@ -813,15 +917,19 @@ async function deleteRemoteEntry() {
     });
     if (!recursiveConfirmed) return;
   }
+  if (activeSessionId.value !== sessionId || !state.selectedEntries.some((entry) => entry.path === selected.path)) {
+    state.error = "会话或选择已经变化，删除已取消";
+    return;
+  }
   try {
     if (selected.kind === "directory") {
-      await deleteSftpDirectoryRecursive(session.id, selected.path);
+      await deleteSftpDirectoryRecursive(sessionId, selected.path);
     } else {
-      await deleteSftpEntry(session.id, selected.path, false);
+      await deleteSftpEntry(sessionId, selected.path, false);
     }
-    await loadDirectory(sftpPath.value, false);
+    await loadDirectory(sessionId, state.path, false);
   } catch (error) {
-    sftpError.value = describeCommandError(error);
+    state.error = describeCommandError(error);
   }
 }
 
@@ -922,18 +1030,20 @@ function formatEta(seconds?: number | null) {
 }
 
 async function handleDroppedPaths(paths: string[]) {
-  if (!activeSession.value?.connected || !paths.length) return;
+  const session = activeSession.value;
+  if (!session?.connected || !paths.length) return;
+  const sessionId = session.id;
   selectedTool.value = "files";
   const files: string[] = [];
   for (const path of paths) {
     try {
       const manifest = await getLocalDirectoryManifest(path);
-      await uploadDirectoryPath(path, manifest);
+      await uploadDirectoryPath(path, manifest, sessionId);
     } catch {
       files.push(path);
     }
   }
-  if (files.length) await uploadFilePaths(files);
+  if (files.length) await uploadFilePaths(files, sessionId);
 }
 
 function formatUptime(seconds = 0) {
@@ -997,20 +1107,19 @@ onMounted(async () => {
   }
 });
 
-watch(activeSessionId, () => {
+watch(activeSessionId, (sessionId) => {
   renderActiveTerminal();
-  sftpHistory.value = [];
-  sftpHistoryIndex.value = -1;
-  loadSftpStorage();
-  if (activeSession.value?.connected) void loadDirectory(".");
-  else {
-    sftpEntries.value = [];
-    sftpPath.value = ".";
+  if (sessionId) loadSftpStorage(sessionId);
+  const session = sessions.value.find((item) => item.id === sessionId);
+  if (session?.connected) {
+    const state = ensureSftpSessionState(sftpStates, sessionId);
+    void loadDirectory(sessionId, state.path, false);
+    void refreshMetrics();
+  } else {
     systemMetrics.value = null;
     networkRxHistory.value = Array(32).fill(0);
     networkTxHistory.value = Array(32).fill(0);
   }
-  if (activeSession.value?.connected) void refreshMetrics();
 });
 
 onBeforeUnmount(() => {
@@ -1114,8 +1223,8 @@ onBeforeUnmount(() => {
         </aside>
         <div class="file-browser">
           <div class="file-toolbar">
-            <button class="icon-button" aria-label="后退" :disabled="sftpHistoryIndex <= 0" @click="navigateHistory(-1)"><IconArrowLeft :size="20" /></button><button class="icon-button" aria-label="前进" :disabled="sftpHistoryIndex >= sftpHistory.length - 1" @click="navigateHistory(1)"><IconArrowRight :size="20" /></button><button class="icon-button" aria-label="上一级" @click="loadDirectory(parentPath(sftpPath))"><IconArrowUp :size="20" /></button><button class="icon-button" aria-label="刷新" :disabled="sftpLoading" @click="loadDirectory(sftpPath, false)"><IconRefresh :size="19" /></button>
-            <div class="path-field"><input v-model="sftpPath" aria-label="远程路径" @keyup.enter="loadDirectory(sftpPath)" /><button class="icon-button" aria-label="收藏路径" @click="toggleSftpBookmark"><component :is="starred ? IconStarFilled : IconStar" :size="20" /></button></div>
+            <button class="icon-button" aria-label="后退" :disabled="sftpHistoryIndex <= 0" @click="navigateHistory(-1)"><IconArrowLeft :size="20" /></button><button class="icon-button" aria-label="前进" :disabled="sftpHistoryIndex >= sftpHistory.length - 1" @click="navigateHistory(1)"><IconArrowRight :size="20" /></button><button class="icon-button" aria-label="上一级" @click="loadActiveDirectory(parentPath(sftpPath))"><IconArrowUp :size="20" /></button><button class="icon-button" aria-label="刷新" :disabled="sftpLoading" @click="loadActiveDirectory(sftpPath, false)"><IconRefresh :size="19" /></button>
+            <div class="path-field"><input v-model="sftpPath" aria-label="远程路径" @keyup.enter="loadActiveDirectory(sftpPath)" /><button class="icon-button" aria-label="收藏路径" @click="toggleSftpBookmark"><component :is="starred ? IconStarFilled : IconStar" :size="20" /></button></div>
             <label class="sftp-search"><IconSearch :size="15" /><input v-model="sftpSearch" placeholder="筛选" /></label>
             <button class="toolbar-button" :disabled="!activeSession?.connected" @click="startUpload"><IconUpload :size="18" />上传文件</button>
             <button class="toolbar-button" :disabled="!activeSession?.connected" @click="startUploadDirectory"><IconFolder :size="17" />上传目录</button>
@@ -1135,8 +1244,8 @@ onBeforeUnmount(() => {
             <div v-if="sftpLoading" class="sftp-loading">正在读取目录…</div>
             <div v-else-if="activeSession?.connected && !displayedSftpEntries.length && !sftpError" class="sftp-loading">{{ sftpSearch ? '没有匹配的文件' : '目录为空' }}</div>
           </div>
-          <div v-else-if="selectedTool === 'bookmarks'" class="sftp-location-list"><header><strong>路径书签</strong><span>{{ sftpBookmarks.length }} 项</span></header><button v-for="path in sftpBookmarks" :key="path" @dblclick="selectedTool = 'files'; loadDirectory(path)"><IconBookmark :size="17" /><span>{{ path }}</span><small>双击打开</small><IconX :size="15" @click.stop="sftpBookmarks = sftpBookmarks.filter(item => item !== path); writeSftpStorage('liteshell.sftp.bookmarks.v1', sftpBookmarks)" /></button><div v-if="!sftpBookmarks.length" class="empty-tool-state"><IconBookmark :size="34" /><strong>暂无书签</strong><span>在路径栏点击星标收藏常用目录</span></div></div>
-          <div v-else class="sftp-location-list"><header><strong>访问历史</strong><button :disabled="!sftpRecentPaths.length" @click="clearSftpHistory">清空</button></header><button v-for="path in sftpRecentPaths" :key="path" @dblclick="selectedTool = 'files'; loadDirectory(path)"><IconClockHour4 :size="17" /><span>{{ path }}</span><small>双击打开</small></button><div v-if="!sftpRecentPaths.length" class="empty-tool-state"><IconClockHour4 :size="34" /><strong>暂无历史记录</strong><span>浏览过的远程目录会显示在这里</span></div></div>
+          <div v-else-if="selectedTool === 'bookmarks'" class="sftp-location-list"><header><strong>路径书签</strong><span>{{ sftpBookmarks.length }} 项</span></header><button v-for="path in sftpBookmarks" :key="path" @dblclick="selectedTool = 'files'; loadActiveDirectory(path)"><IconBookmark :size="17" /><span>{{ path }}</span><small>双击打开</small><IconX :size="15" @click.stop="removeSftpBookmark(path)" /></button><div v-if="!sftpBookmarks.length" class="empty-tool-state"><IconBookmark :size="34" /><strong>暂无书签</strong><span>在路径栏点击星标收藏常用目录</span></div></div>
+          <div v-else class="sftp-location-list"><header><strong>访问历史</strong><button :disabled="!sftpRecentPaths.length" @click="clearSftpHistory">清空</button></header><button v-for="path in sftpRecentPaths" :key="path" @dblclick="selectedTool = 'files'; loadActiveDirectory(path)"><IconClockHour4 :size="17" /><span>{{ path }}</span><small>双击打开</small></button><div v-if="!sftpRecentPaths.length" class="empty-tool-state"><IconClockHour4 :size="34" /><strong>暂无历史记录</strong><span>浏览过的远程目录会显示在这里</span></div></div>
           <footer class="file-summary">{{ sftpEntries.length }} 项<span v-if="selectedRemoteFiles.length"> · 已选择 {{ selectedRemoteFiles.length }} 项</span></footer>
         </div>
       </section>
