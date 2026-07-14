@@ -29,10 +29,29 @@ jobs:
       - name: Apply preflight patches
         run: python scripts/pre_fix_apply_pr7.py
       - name: Harden implementation script
-        run: python scripts/fix_apply_pr7.py
+        id: harden
+        shell: pwsh
+        run: |
+          python scripts/fix_apply_pr7.py *> pr7-harden.log
+          $code = $LASTEXITCODE
+          Get-Content pr7-harden.log | Select-Object -Last 60
+          "exit_code=$code" >> $env:GITHUB_OUTPUT
+          exit 0
+      - name: Upload hardening diagnostic
+        if: steps.harden.outputs.exit_code != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr7-harden-diagnostic
+          path: pr7-harden.log
+          retention-days: 1
+      - name: Stop after hardening failure
+        if: steps.harden.outputs.exit_code != '0'
+        run: exit 1
       - name: Validate hardened script
+        if: steps.harden.outputs.exit_code == '0'
         run: python -m py_compile scripts/apply_pr7.py
       - name: Apply PR7 implementation
+        if: steps.harden.outputs.exit_code == '0'
         id: apply
         shell: pwsh
         run: |
