@@ -24,6 +24,8 @@ jobs:
         with:
           ref: fix/sftp-recursive-transfer-safety
           fetch-depth: 0
+      - name: Repair patch script
+        run: python scripts/fix_apply_pr6.py
       - name: Apply PR6 patch
         id: apply
         shell: pwsh
