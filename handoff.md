@@ -1,241 +1,335 @@
 # LiteShell 任务交接文档
 
-更新时间：2026-07-13  
-工作区：`D:\work\codex\LiteShell`  
-应用目录：`D:\work\codex\LiteShell`（项目已扁平化到仓库根目录）
+更新时间：2026-07-14  
+用户当前本地目录：`D:\Project\codex\lite-shell`  
+仓库：`https://github.com/kelei321/lite-shell`
 
-## 1. 项目目标
+## 1. 文档使用规则
 
-LiteShell 是一款面向 Windows 桌面的轻量级 SSH 客户端，界面参考 FinalShell，但不照搬其品牌和实现。
+新会话或新任务开始前必须依次阅读：
+
+1. `plan.md`：SFTP 后续开发的唯一执行计划和进度清单。
+2. `README.md`：项目使用方式、能力、限制和开发约束。
+3. `handoff.md`：当前代码状态、验证结果和最近上下文。
+
+每完成一个 SFTP PR，必须在同一个 PR 中同步更新：
+
+- `plan.md`
+- `README.md`
+- `handoff.md`
+
+不得只修改代码而不更新项目状态文档。
+
+## 2. 项目目标
+
+LiteShell 是一款面向 Windows 桌面的轻量级 SSH 和 SFTP 客户端，界面参考 FinalShell 的高信息密度工作台，但不照搬其品牌和实现。
 
 核心目标：
 
-- 使用 Tauri + Rust，保持较低内存占用，不为连接管理器等功能新增 WebView。
-- 提供真实 SSH 终端、SFTP、Linux 系统监控、连接管理、主机密钥校验和安全凭据存储。
-- 默认深色、高信息密度、低干扰，终端保持最高视觉优先级。
-- 未连接时显示快速连接页，连接后切换到终端和 SFTP 工作区。
-- 密码和私钥口令不得写入普通 JSON，统一保存到 Windows 凭据管理器。
+- 使用 Tauri 2 + Rust，保持较低内存占用。
+- 提供真实 SSH 终端、SFTP、Linux 系统监控和连接管理。
+- 使用主机密钥校验和 Windows Credential Manager 保护凭据。
+- 不为连接管理器等功能新增独立 WebView。
+- 默认深色、低干扰，终端保持最高视觉优先级。
+- 密码和私钥口令不得写入普通 JSON、日志或导出文件。
 
 技术栈：
 
-- Vue 3 + TypeScript + Vite 6
-- Tauri 2
-- Rust + `russh` + `russh-sftp`
+- Vue 3
+- TypeScript
+- Vite 6
 - xterm.js
+- Tauri 2
+- Rust stable
+- `russh`
+- `russh-sftp`
 - Node.js 24.16.0
+- npm
 
-## 2. 当前进度
+## 3. 当前阶段
 
-整体已进入“核心功能可用、继续完善可靠性和交互”的阶段。
+项目已进入“核心功能可用，集中补强可靠性和交互”的阶段。
 
-已具备真实能力：
+最新基础设施已经完成：
 
-- SSH 密码/私钥认证、PTY、终端输入输出、窗口尺寸同步、断开连接。
-- SSH 主机密钥 TOFU 校验和 `known_hosts`。
-- 真实 SFTP 浏览、上传、下载、文件夹递归传输、重命名、新建和递归删除。
-- 真实 Linux 系统监控，包括 CPU、内存、交换分区、网络、磁盘、运行时间和采样延迟。
-- v2 连接管理器，包括多级文件夹、搜索排序、多选、拖放、批量操作和导入导出。
-- 未连接时的 FinalShell 风格快速连接页面。
+- 根目录已有完整 `README.md`。
+- `package.json` 已补齐开发、校验、测试和构建命令。
+- GitHub Actions 已拆分为 Frontend 和 Rust 两个 Windows job。
+- CI 会运行前端类型检查、前端生产构建、Rust 格式检查、Rust 测试和 Clippy 高风险规则。
 
-最新工作集中在 SFTP：
+当前主线优先级已经切换到 SFTP 可靠性改造。
 
-- 实时速度和预计剩余时间。
-- 覆盖、跳过、自动重命名、取消四种冲突策略。
-- 文件和文件夹拖放上传。
-- 当前目录搜索和按名称、大小、修改时间排序。
-- 取消或失败后点击重试进行断点续传。
+完整路线维护在 `plan.md`，共 9 个小步 PR：
 
-Vite 已配置忽略 `src-tauri/target`，避免 Cargo 编译时 Windows 锁定 `.exe` 导致 Node 24 抛出 `EBUSY`。
+1. SFTP 会话状态隔离。
+2. 相同目标路径传输互斥。
+3. 文件与目录冲突保护。
+4. 统一传输终态和清理。
+5. 安全断点续传和任务检查点。
+6. 递归传输和符号链接安全。
+7. 明确目录冲突语义。
+8. 后端统一传输队列、暂停和恢复。
+9. SFTP 导航与批量操作完善。
 
-## 3. 已完成修改
+当前状态：计划已建立，功能实施尚未开始。下一任务是 PR1。
+
+## 4. 已具备功能
 
 ### SSH
 
 - Rust `russh` 真实连接后端。
 - 密码和私钥认证。
-- PTY shell、终端数据事件、输入、resize 和 disconnect。
-- 主机密钥指纹确认和已知主机持久化。
-- xterm.js 终端接入。
-- 多会话标签，最后一个会话关闭后回到快速连接页。
-- 已移除最初三个演示会话和模拟终端输出。
-
-### 连接配置与凭据
-
-- `connections.json` v2 存储结构。
-- `ConnectionFolder` 多级目录和 `folderId`。
-- v1 `group` 字符串自动迁移，保持连接 ID 和凭据 ID 不变。
-- 配置写入采用临时文件和 Windows 原子替换。
-- 密码、私钥口令使用 Windows Credential Manager。
-- 导出文件不包含密码、口令或私钥内容。
-
-### 连接管理器
-
-- 大尺寸应用内模态窗口，无新增 WebView。
-- 全部连接、收藏、多级文件夹树。
-- 文件夹新增、重命名、移动、删除和循环父子关系拦截。
-- 连接新增、编辑、复制、删除、收藏和移动。
-- 搜索、表头排序、多选、拖放和右键菜单。
-- 双击连接会关闭管理器并连接。
-- 批量连接最多并发 3 个。
-- LiteShell JSON 导入导出。
-- OpenSSH config 导入。
-- FinalShell 配置目录容错导入。
-- 导入预览、重复连接跳过和失败警告。
-- 已修复连接管理器关闭按钮失效问题：Dialog 的 `open()` 导入曾与 `open` prop 重名。
+- PTY Shell。
+- 终端输入输出。
+- 窗口尺寸同步。
+- 主动断开。
+- 主机密钥 TOFU 确认。
+- `known_hosts` 持久化和主机密钥变更拦截。
+- xterm.js 终端。
+- 多会话标签。
+- 最后一个会话关闭后返回快速连接页。
+- 已移除 Mock SSH、Mock 输出和演示会话。
 
 ### SFTP
 
 - 真实 SFTP 通道和目录读取。
 - 文件、目录、符号链接、大小、修改时间和权限展示。
 - 路径跳转、返回、前进、上级和刷新。
-- 多文件上传、单文件和批量下载。
-- 文件夹递归上传和远程文件夹递归下载。
-- 全局最多 3 路文件传输，由 Rust `Semaphore` 强制控制。
-- 新建目录、重命名、文件删除。
-- 非空目录递归删除，两次明确确认。
-- 递归删除规范化路径、保护根目录并防止服务器返回越界路径。
-- 上传和下载采用 `.liteshell.part` 临时文件。
-- 安全覆盖采用“备份原文件 -> 提交临时文件 -> 成功后删除备份；失败则恢复”。
-- 传输取消、失败重试和运行期间断点续传。
-- 传输速度、ETA、续传字节数和约 200ms 事件节流。
-- 冲突策略：安全覆盖、跳过、自动重命名、取消；批量操作支持应用到全部。
-- Windows 拖放文件和文件夹上传。
-- 当前目录文件名筛选。
-- 按名称、大小和修改时间排序，目录始终优先。
-- 路径书签、访问历史按连接保存到 `localStorage`。
-- SFTP 错误转换为较友好的中文提示。
+- 多文件上传。
+- 单文件和批量下载。
+- 本地目录递归上传。
+- 远程目录递归下载。
+- Rust `Semaphore` 全局限制最多 3 路传输。
+- 新建目录。
+- 重命名。
+- 文件删除。
+- 非空目录递归删除和二次确认。
+- 递归删除保护根目录并检查服务器返回路径边界。
+- `.liteshell.part` 临时文件。
+- 覆盖时使用“备份原文件 -> 提交临时文件 -> 删除备份”的流程。
+- 取消、失败重试和当前运行期断点续传。
+- 速度、ETA、续传字节数和事件节流。
+- 覆盖、跳过、自动重命名、取消冲突策略。
+- 批量冲突支持“应用到全部”。
+- Windows 文件和文件夹拖放上传。
+- 当前目录搜索。
+- 名称、大小和修改时间排序。
+- 目录优先排序。
+- 路径书签和访问历史。
+- 较友好的中文错误提示。
+
+### 连接配置与凭据
+
+- `connections.json` v2 存储结构。
+- 多级 `ConnectionFolder` 和 `folderId`。
+- v1 分组向 v2 文件夹自动迁移。
+- 配置写入使用临时文件和 Windows 原子替换。
+- 密码和私钥口令保存到 Windows Credential Manager。
+- 导出不包含密码、私钥口令或私钥内容。
+
+### 连接管理器
+
+- 应用内大尺寸模态窗口，无新增 WebView。
+- 全部连接、收藏和多级文件夹树。
+- 文件夹新增、重命名、移动和删除。
+- 循环父子关系拦截。
+- 连接新增、编辑、复制、删除、收藏和移动。
+- 搜索、表头排序、多选、拖放和右键菜单。
+- 双击连接后关闭管理器并连接。
+- 批量连接最多并发 3 个。
+- LiteShell JSON 导入导出。
+- OpenSSH config 导入。
+- FinalShell 配置目录容错导入。
+- 导入预览、重复连接跳过和失败警告。
 
 ### 系统监控
 
-- 使用固定的只读 Linux 命令采样，不允许前端任意拼接监控命令。
+- 使用固定只读 Linux 命令采样。
+- 不允许前端动态拼接监控命令。
 - 解析 `/proc/stat`、`/proc/meminfo`、`/proc/net/dev`、`/proc/uptime` 和 `df`。
-- CPU 差值、内存、Swap、网络速率和历史曲线。
-- 磁盘显示“剩余/总计”。
-- 延迟显示真实采样耗时。
+- CPU、内存、Swap、网络速率、磁盘、运行时间和采样延迟。
 
 ### 快速连接与 UI
 
-- 删除初始演示会话。
 - 无活动会话时显示快速连接表单。
 - 支持主机、端口、用户名、密码、保存连接和保存密码。
-- 展示最多 6 个已保存连接和连接管理器入口。
-- 深色 FinalShell 风格布局和紧凑信息密度。
+- 展示已保存连接和连接管理器入口。
+- 深色紧凑工作台布局。
 
-## 4. 关键文件
+## 5. SFTP 已确认风险
+
+以下风险是 `plan.md` 的直接来源：
+
+1. SFTP 路径、列表、loading、错误、选中项和历史目前仍是全局状态。
+2. 旧会话目录请求可能在切换会话后覆盖新会话界面。
+3. 旧服务器选中项可能与当前活动会话组合成错误写操作。
+4. 相同目标任务可能共享固定的 `{target}.liteshell.part`。
+5. 文件覆盖逻辑尚未完整区分目标是文件还是目录。
+6. shutdown、备份或提交阶段错误可能缺少统一终态和清理。
+7. 续传只校验 `.part` 长度，没有验证源文件身份。
+8. 任务和断点信息不会跨应用重启恢复。
+9. 递归下载当前会把 symlink 当作可下载文件处理。
+10. 本地递归扫描需要补 junction、深度、数量和取消保护。
+11. 目录“覆盖”目前实际更接近合并，语义不准确。
+12. 前端和后端各自维护部分传输队列状态，事实来源不统一。
+13. 拖放监听整个 Tauri 窗口，不限于 SFTP 区域。
+
+PR1～PR5 完成前，不优先新增远程文件编辑、预览或更多批量写入能力。
+
+## 6. 当前下一任务：PR1
+
+任务：SFTP 会话状态隔离。  
+建议分支：`fix/sftp-session-state-isolation`
+
+PR1 只处理：
+
+- 每个 SSH 会话独立保存 SFTP 状态。
+- 异步目录请求增加 session/request version 守卫。
+- 路径、列表、loading、错误、选中项和历史按会话隔离。
+- 删除、重命名和下载校验选中项所属会话。
+- 切换标签恢复各自路径。
+- 关闭会话清理对应状态。
+- 提取可测试的纯状态模块。
+- 增加前端竞态测试；是否引入 Vitest由 PR1 评估决定。
+
+PR1 不处理：
+
+- 后端目标路径锁。
+- `.part` 命名。
+- 文件/目录冲突。
+- 断点续传协议。
+- 传输暂停。
+- 导航 UI 重设计。
+- 其他 SSH 或连接管理器问题。
+
+完成 PR1 后必须同步更新 `plan.md`、`README.md` 和本文件。
+
+## 7. 关键文件
+
+### 项目文档和流程
+
+- `plan.md`
+  - SFTP 9 个 PR 的范围、状态、测试和验收标准。
+- `README.md`
+  - 面向用户和贡献者的项目说明。
+- `handoff.md`
+  - 当前交接上下文和下一任务。
+- `.github/workflows/ci.yml`
+  - Frontend 与 Rust CI。
+- `package.json`
+  - npm scripts。
 
 ### 前端
 
 - `src/App.vue`
-  - 主界面、会话、终端、SFTP、系统监控、快速连接和传输队列。
+  - 主界面、会话、终端、SFTP、系统监控、快速连接和当前传输 UI。
 - `src/styles.css`
-  - 主界面、SFTP、拖放覆盖层、冲突对话框和传输状态样式。
+  - 主界面、SFTP、拖放层、冲突对话框和传输状态样式。
 - `src/components/ConnectionManager.vue`
-  - 连接管理器完整 UI。
+  - 连接管理器。
 - `src/services/ssh.ts`
-  - Tauri 命令类型、SSH/SFTP/连接管理器前端接口。
+  - Tauri 命令类型和前端接口。
 - `vite.config.mjs`
-  - 已排除 `src-tauri/target` 文件监听。
+  - 忽略 `src-tauri/target` 文件监听，避免 Windows EBUSY。
 
 ### Rust/Tauri
 
 - `src-tauri/src/ssh.rs`
   - SSH 会话、认证、PTY、主机密钥和事件。
 - `src-tauri/src/sftp.rs`
-  - SFTP 浏览、传输、递归操作、冲突策略、断点续传、速度和 ETA。
+  - SFTP 浏览、传输、递归操作、冲突、续传、速度和 ETA。
 - `src-tauri/src/monitor.rs`
-  - 只读系统监控命令及解析。
+  - 固定只读系统监控命令和解析。
 - `src-tauri/src/profiles.rs`
-  - v2 连接存储、凭据、迁移、批量操作和导入导出。
+  - 连接存储、凭据、迁移、批量操作和导入导出。
 - `src-tauri/src/lib.rs`
   - Tauri 状态和命令注册。
 - `src-tauri/Cargo.toml`
-  - Rust 依赖和 release 体积优化。
+  - Rust 依赖和 release 配置。
 - `src-tauri/tauri.conf.json`
-  - Tauri 窗口和开发命令配置。
+  - Tauri 窗口和开发命令。
 - `src-tauri/capabilities/default.json`
-  - Tauri 权限配置。
+  - Tauri 权限。
 
-## 5. 不能动的边界
+## 8. 开发和安全边界
 
 - 默认使用中文回复。
-- 修改代码前必须先向用户说明计划。
-- 前端验证如果准备运行 production build，必须先询问用户；不要自行运行 `yarn build`、`npm run build`、`pnpm build` 或 `tauri build`。
-- 用户此前明确要求服务器命令只能使用只读命令。未经新的明确授权，不得在其服务器上执行上传、创建、重命名、删除、写文件、改权限等操作。
-- 如需验证服务器状态，只允许类似 `whoami`、`pwd`、`uname`、`uptime`、`df`、`free`、`ps`、`ls`、`stat` 等只读命令。
-- 不得把密码、私钥口令或私钥内容写入 `connections.json`、导出文件、日志或终端输出。
-- 第三方导入不得读取、解密或迁移 FinalShell/OpenSSH 的敏感凭据。
-- 保持轻量：连接管理器等功能不得新增 WebView，避免引入大型 UI/状态库，除非有充分理由并获得用户认可。
-- 不要恢复 Mock 终端、Mock 系统监控或初始演示会话。
-- 不要使用破坏性 Git 命令，不要覆盖用户已有无关修改。
-- `src-tauri/target` 是 Rust 编译产物；不要提交，也不要直接删除，除非用户明确要求清理并确认代价。
+- 修改前先说明本次 PR 的具体计划。
+- 开始 SFTP 任务前必须阅读 `plan.md`。
+- 每个 PR 只完成一个计划任务。
+- 不使用破坏性 Git 命令，不覆盖无关修改。
+- 不提交 `src-tauri/target`。
+- 保持 Tauri 应用轻量，不新增大型状态库或独立 WebView，除非获得用户认可。
+- 不恢复 Mock 终端、Mock 监控或演示会话。
+- 密码、私钥口令和私钥内容不得写入 JSON、导出、日志或终端。
+- 第三方导入不得读取、解密或迁移敏感凭据。
+- 服务器监控命令必须固定且只读。
+- 未经用户重新明确授权，不得在用户服务器执行上传、创建、重命名、删除、写文件或改权限。
+- 真实 SFTP 写测试优先由用户在专用临时目录执行。
 
-## 6. 已经否掉的方案
+## 9. 开发环境
 
-- 否掉模拟 SSH、模拟终端输出和模拟系统监控，已全部切换为真实后端。
-- 否掉启动时默认创建三个演示会话。
-- 否掉在 JSON 中保存密码或私钥口令，改用 Windows Credential Manager。
-- 否掉第三方导入敏感凭据，只导入非敏感连接元数据。
-- 否掉为连接管理器创建独立 WebView，改为应用内模态窗口。
-- 否掉上传/下载直接覆盖目标文件，改用临时文件和备份恢复。
-- 否掉非空目录直接调用 `remove_dir`，改用显式二次确认的后端递归删除。
-- 否掉只依靠前端限制传输并发，改用 Rust `Semaphore` 全局限制 3 路。
-- 否掉新传输自动复用任意旧 `.part` 文件。新任务 `resume=false` 会重建临时文件，只有同一运行期失败/取消后的“重试”使用 `resume=true`，避免误续传其他内容。
-- 否掉把所有 SFTP 功能堆入一个大操作面板，仍保持终端和文件列表为主要视觉区域。
+Windows 完整桌面开发需要：
 
-## 7. 当前风险点
+- Node.js 24.16.0
+- npm
+- Rust stable MSVC 工具链
+- `rustfmt`
+- `clippy`
+- Visual Studio Build Tools
+- “使用 C++ 的桌面开发”工作负载
+- MSVC v143 x64/x86
+- Windows 10/11 SDK
+- WebView2 Runtime
 
-### 已处理的启动问题
+安装依赖：
 
-- Windows + Node 24.16.0 曾因 Vite 监听 Cargo `target` 而报 `EBUSY`。
-- `vite.config.mjs` 已加入：
-
-```ts
-watch: {
-  ignored: ["**/src-tauri/target/**"],
-},
+```powershell
+npm ci
 ```
 
-### SFTP 风险
+启动桌面开发：
 
-- 最新 SFTP 速度、ETA、冲突对话框、拖放和续传已通过编译与类型检查，但尚未在真实窗口中完成手工交互测试。
-- 断点续传仅支持当前运行期间失败/取消后重试；应用重启后的队列恢复未实现。
-- 递归删除不是事务操作；执行中途遇到权限或网络错误时，已删除部分无法自动恢复。
-- 拖放事件当前监听整个 Tauri 窗口，只要存在活动连接就会显示 SFTP 上传覆盖层，不限于鼠标位于 SFTP 面板。
-- 断点续传依赖 `.liteshell.part` 长度，没有内容哈希校验；为降低误续传风险，仅重试任务启用续传。
-- 大文件、数万小文件、弱网、磁盘满、超长路径、Emoji 文件名尚未做专项实机测试。
-- 传输队列和任务元数据未持久化，重启后不会恢复。
+```powershell
+npm run desktop
+```
 
-### 连接管理器风险/缺口
+常规验证：
 
-- 批量移动主要依赖拖放，缺少明确的“移动到文件夹”批量菜单。
-- 只有批量收藏，缺少批量取消收藏。
-- 文件夹缺少拖回根目录和同级手动排序。
-- `sortOrder` 已有字段，但缺少完整的手动排序交互。
-- FinalShell 导入 UI 当前主要选择目录，单个 JSON 文件入口仍需确认。
-- 导入预览信息仍较简略。
+```powershell
+npm run validate
+```
 
-### 其他缺口
+完整安装包构建：
 
-- 状态栏“转发 0”仍是固定显示，端口转发尚未实现。
-- UTF-8 为固定显示，编码切换尚未实现。
-- 保存连接列表的在线状态点尚未完全绑定真实会话。
-- 尚未执行 production build 和安装包验证。
+```powershell
+npm run desktop:build
+```
 
-## 8. 已经跑过的测试
+## 10. 已运行验证
 
-最新验证结果：
+最近合并的文档和 CI PR：
 
-- `cargo test`：10 项测试全部通过。
+- PR #1：`docs: add README and complete CI validation`
+- squash merge：`e2d0906229c08a5d95f01a1e329f7f11ccc66d62`
+- CI 通过：
+  - `npm ci`
+  - Vue/TypeScript 类型检查
+  - Vite 生产构建
+  - Rust 格式检查
+  - Rust 测试
+  - Clippy correctness/suspicious
+
+旧 handoff 记录的代码验证：
+
+- `cargo test`：10 项通过。
 - `vue-tsc --noEmit`：通过。
-- 使用 Node.js 24.16.0：
-  - `C:\Users\Administrator\AppData\Roaming\fnm\node-versions\v24.16.0\installation\node.exe`
-- 未运行 production build。
 
-Rust 测试覆盖包括：
+Rust 测试已覆盖：
 
 - SSH 连接字段校验。
 - Linux 系统监控样本解析。
-- v1 分组到 v2 文件夹迁移。
+- v1 分组向 v2 文件夹迁移。
 - 文件夹循环关系拦截。
 - OpenSSH 通配符跳过。
 - 导出不包含秘密。
@@ -243,7 +337,7 @@ Rust 测试覆盖包括：
 - 本地目录递归清单。
 - 自动重命名文件名拆分。
 
-此前真实 SSH 只读测试已由用户执行并确认通过：
+用户此前执行过真实 SSH 只读验证：
 
 - `whoami`
 - `pwd`
@@ -253,60 +347,52 @@ Rust 测试覆盖包括：
 - `free -h`
 - `ps`
 
-未做的测试：
+尚未完成：
 
-- 未在用户服务器上执行任何 SFTP 写入/删除测试。
-- 未对最新拖放、冲突策略、速度、ETA 和续传做 GUI 手工测试。
-- 未运行 production build。
+- 最新 SFTP 写入、删除和弱网实机测试。
+- 大文件、数千小文件、磁盘满、超长路径和特殊字符专项测试。
+- 完整安装包验证。
 
-## 9. 下一步计划
+## 11. PR 工作流
 
-建议按以下顺序继续：
+1. 从最新 `main` 创建计划指定分支。
+2. 只修改当前任务所需文件。
+3. 实现后运行相关测试和 `npm run validate`。
+4. 同步更新 `plan.md`、`README.md` 和 `handoff.md`。
+5. 比较 `main...branch`。
+6. 创建 PR，描述包含 Summary、Validation、Scope。
+7. code review 必须列出：
+   - PR 状态。
+   - head SHA。
+   - changed files。
+   - CI。
+   - blockers。
+   - non-blocking suggestions。
+   - scope check。
+   - 明确结论。
+8. CI 通过且无阻塞问题后 squash merge。
+9. 合并时使用 expected head SHA，并在合并后回查 merged、merge commit 和 merged_at。
 
-1. 在仓库根目录运行 `yarn install` 恢复已清理的依赖。
-2. 运行 `yarn desktop` 启动开发窗口；这不是 production build，不需要执行 build。
-3. 先做不连接服务器的 UI 检查：
-   - 快速连接页。
-   - 连接管理器关闭、搜索和表单。
-   - SFTP 搜索框、排序表头、冲突弹窗布局。
-4. 如用户继续保持“服务器只能读”限制，不做 SFTP 写测试；请用户自行使用专门的临时目录验证：
-   - 覆盖、跳过、自动重命名。
-   - 拖入单文件、多文件和文件夹。
-   - 取消后重试，确认“已续传”字节数。
-   - 非空目录递归删除二次确认。
-5. 根据手工测试结果修复交互问题。
-6. 后续可实现：
-   - 应用重启后的传输队列恢复。
-   - 哈希校验。
-   - 拖放区域限制到 SFTP 面板。
-   - 传输暂停/继续（当前是取消后重试续传）。
-   - 远程文件预览和编辑。
-   - 连接管理器剩余批量操作。
-   - 端口转发和编码切换。
-7. 如需要 production build，必须先询问用户。
-
-## 10. 新窗口启动提示词
-
-将下面内容复制到新的 Codex 窗口：
+## 12. 新会话启动提示词
 
 ```text
-请继续开发 D:\work\codex\LiteShell 项目。
+请继续开发 D:\Project\codex\lite-shell 项目。
 
-先完整阅读 D:\work\codex\LiteShell\handoff.md，并检查仓库当前代码，不要重新实现已完成功能。
+开始前依次完整阅读：
+1. plan.md
+2. README.md
+3. handoff.md
 
-项目要求：
+当前优先任务是 plan.md 中的 PR1：SFTP 会话状态隔离。
+
+要求：
 - 默认中文回复。
-- 修改代码前先说明计划。
-- 如果要运行前端 production build，必须先询问我。
-- 使用 Node.js 24.16.0。
-- 未经我重新授权，不得在服务器上执行任何写入、上传、创建、重命名、删除或改权限操作；服务器命令只能只读。
-- 不得在 JSON、导出、日志或终端中暴露密码、私钥口令或私钥内容。
-- 保持 Tauri 应用轻量，不新增 WebView，不恢复任何 Mock 数据或演示会话。
-
-当前优先任务：
-1. 在仓库根目录使用 Node.js 24.16.0 运行 yarn install 和 yarn desktop，检查最新 SFTP UI 是否能正常加载。
-3. 不做服务器写操作；先验证界面、类型和本地逻辑。
-4. 检查 SFTP 的速度、ETA、冲突策略、拖放、搜索排序、取消重试和断点续传是否存在问题。
-
-验证可以运行 cargo test 和 vue-tsc --noEmit；不要运行 production build，除非先获得我的同意。
+- 修改前先说明本次小步计划。
+- 从最新 main 创建 fix/sftp-session-state-isolation。
+- 只处理 SFTP 多会话状态隔离和异步目录请求竞态。
+- 不顺带修改传输后端、断点续传、队列或其他 SSH 功能。
+- 完成后运行测试和 npm run validate。
+- 同步更新 plan.md、README.md、handoff.md。
+- compare main...branch 后创建 PR，等待 code review 和 CI，通过后再合并。
+- 未经明确授权，不得在用户服务器执行任何写操作。
 ```
