@@ -3,31 +3,31 @@ from pathlib import Path
 
 path = Path("scripts/apply_pr9_upload_review_fixes.py")
 text = path.read_text(encoding="utf-8")
-start_marker = '''    text = replace_once(
-        text,
-        ''' + "'''" + '''    if path.is_empty() || matches!(path, "/" | "." | "..") || path.contains('''
-end_marker = '''        "remote path traversal validation",
-    )
-'''
+start_marker = "    text = replace_once(\n        text,\n        '''    if path.is_empty() || matches!(path, \"/\" | \".\" | \"..\") || path.contains("
+end_marker = '        "remote path traversal validation",\n    )\n'
 start = text.find(start_marker)
 end = text.find(end_marker, start)
 if start < 0 or end < 0:
     raise RuntimeError("remote path validation patch block not found")
-replacement = r'''    validation_start = text.find(
-        '    if path.is_empty() || matches!(path, "/" | "." | "..") || path.contains('
-    )
-    validation_end = text.find(" {\n", validation_start)
-    if validation_start < 0 or validation_end < 0:
-        raise RuntimeError("remote path validation condition not found")
-    validation = r'''    if path.is_empty()
-        || matches!(path, "/" | "." | "..")
-        || path.contains('\0')
-        || path.contains('\\')
-        || path.split('/').any(|component| component == "..")
-    {
-'''
-    text = text[:validation_start] + validation + text[validation_end + len(" {\n"):]
-'''
+replacement = "\n".join([
+    "    validation_start = text.find(",
+    "        '    if path.is_empty() || matches!(path, \\\"/\\\" | \\\".\\\" | \\\"..\\\") || path.contains('",
+    "    )",
+    "    validation_end = text.find(\\\" {\\\\n\\\", validation_start)",
+    "    if validation_start < 0 or validation_end < 0:",
+    "        raise RuntimeError(\\\"remote path validation condition not found\\\")",
+    "    validation = \\\"\\\\n\\\".join([",
+    "        \\\"    if path.is_empty()\\\" ,",
+    "        \\\"        || matches!(path, \\\\\\\"/\\\\\\\" | \\\\\\\".\\\\\\\" | \\\\\\\"..\\\\\\\")\\\" ,",
+    "        r\\\"        || path.contains('\\\\0')\\\" ,",
+    "        r\\\"        || path.contains('\\\\\\\\')\\\" ,",
+    "        \\\"        || path.split('/').any(|component| component == \\\\\\\"..\\\\\\\")\\\" ,",
+    "        \\\"    {\\\" ,",
+    "        \\\"\\\" ,",
+    "    ])",
+    "    text = text[:validation_start] + validation + text[validation_end + len(\\\" {\\\\n\\\"):]",
+    "",
+])
 text = text[:start] + replacement + text[end + len(end_marker):]
 path.write_text(text, encoding="utf-8", newline="\n")
 Path("scripts/fix_pr9_upload_review_script.py").unlink()
