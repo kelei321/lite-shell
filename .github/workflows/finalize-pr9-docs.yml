@@ -1,0 +1,32 @@
+name: Finalize PR9 documentation
+
+on:
+  push:
+    branches:
+      - feat/sftp-directory-conflict-strategies
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feat/sftp-directory-conflict-strategies
+          fetch-depth: 0
+      - name: Validate documentation finalizer
+        run: python -c "import ast, pathlib; p='scripts/finalize_pr9_docs.py'; ast.parse(pathlib.Path(p).read_text(encoding='utf-8'), filename=p)"
+      - name: Finalize documentation
+        run: python scripts/finalize_pr9_docs.py
+      - name: Commit documentation
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "docs: finalize PR7 validation status"
+          git push origin HEAD:feat/sftp-directory-conflict-strategies
