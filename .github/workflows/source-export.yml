@@ -1,4 +1,4 @@
-name: Apply Agent Patch
+name: Format Agent Rust
 
 on:
   pull_request:
@@ -9,23 +9,24 @@ permissions:
   contents: write
 
 jobs:
-  apply:
+  format:
     if: github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
-      - name: Apply and commit patch
-        shell: bash
+      - shell: pwsh
         run: |
-          if [ ! -f .agent.patch ]; then exit 0; fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git apply --check .agent.patch
-          git apply --index .agent.patch
-          git rm .agent.patch
-          git commit -m "fix: protect SFTP entry type conflicts"
-          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          if (git status --porcelain) {
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add src-tauri/src/sftp.rs
+            git commit -m "style: format PR3 Rust changes"
+            git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
+          }
