@@ -8,6 +8,7 @@ export type SftpSessionState = {
   entries: SessionSftpEntry[];
   loading: boolean;
   error: string;
+  notice: string;
   selectedEntries: SessionSftpEntry[];
   history: string[];
   historyIndex: number;
@@ -25,6 +26,7 @@ export function createSftpSessionState(sessionId: string): SftpSessionState {
     entries: [],
     loading: false,
     error: "",
+    notice: "",
     selectedEntries: [],
     history: [],
     historyIndex: -1,

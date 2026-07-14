@@ -8,6 +8,7 @@ import "@xterm/xterm/css/xterm.css";
 import ConnectionManager from "./components/ConnectionManager.vue";
 import {
   cancelSftpTransfer,
+  commandErrorCode,
   connectProfile,
   connectSsh,
   createSftpDirectory,
@@ -20,6 +21,7 @@ import {
   downloadSftpFile,
   fetchSystemMetrics,
   getLocalDirectoryManifest,
+  getRemoteDirectoryManifest,
   disconnectSsh,
   isTauri,
   listProfiles,
@@ -36,6 +38,8 @@ import {
   type ConnectionProfile,
   type ConflictStrategy,
   type LocalDirectoryManifest,
+  type RecursiveScanSummary,
+  type RemoteDirectoryManifest,
   type ConnectRequest,
   type SftpEntry,
   type SshEvent,
@@ -117,6 +121,7 @@ const selectedRemoteFiles = computed({
 });
 const transfers = ref<TransferEvent[]>([]);
 const pendingTransferCheckpoints = ref<TransferCheckpoint[]>([]);
+const recursiveScan = ref<{ id: string; sessionId: string; label: string } | null>(null);
 const sftpHistory = computed({
   get: () => activeSftpState.value.history,
   set: (value: string[]) => { activeSftpState.value.history = value; },
@@ -645,6 +650,44 @@ async function runWithConcurrency<T>(items: T[], worker: (item: T) => Promise<vo
   if (errors.length) throw errors[0];
 }
 
+async function runRecursiveScan<T>(
+  sessionId: string,
+  label: string,
+  scanner: (scanId: string) => Promise<T>,
+): Promise<T> {
+  if (recursiveScan.value) throw new Error("已有目录扫描正在运行");
+  const scanId = crypto.randomUUID();
+  recursiveScan.value = { id: scanId, sessionId, label };
+  try {
+    return await scanner(scanId);
+  } finally {
+    if (recursiveScan.value?.id === scanId) recursiveScan.value = null;
+  }
+}
+
+function updateRecursiveScanNotice(state: SftpSessionState, summary: RecursiveScanSummary) {
+  const skipped = summary.skippedLinks + summary.skippedUnsupported;
+  state.notice = skipped
+    ? `目录扫描完成：${summary.fileCount} 个文件、${summary.directoryCount} 个目录，已跳过 ${summary.skippedLinks} 个链接和 ${summary.skippedUnsupported} 个不支持项。${summary.warnings[0] ?? ""}`
+    : `目录扫描完成：${summary.fileCount} 个文件、${summary.directoryCount} 个目录，共 ${formatBytes(summary.totalSize)}。`;
+}
+
+function scanLocalDirectory(path: string, sessionId: string) {
+  return runRecursiveScan(sessionId, "正在安全扫描本地目录", (scanId) => getLocalDirectoryManifest(path, scanId));
+}
+
+function scanRemoteDirectory(sessionId: string, path: string): Promise<RemoteDirectoryManifest> {
+  return runRecursiveScan(sessionId, "正在安全扫描远程目录", (scanId) => getRemoteDirectoryManifest(sessionId, path, scanId));
+}
+
+async function cancelRecursiveScan() {
+  const scan = recursiveScan.value;
+  if (!scan) return;
+  await cancelSftpTransfer(scan.id).catch((error) => {
+    ensureSftpSessionState(sftpStates, scan.sessionId).error = describeCommandError(error);
+  });
+}
+
 async function startUpload() {
   const session = activeSession.value;
   if (!session?.connected) return;
@@ -714,7 +757,8 @@ async function uploadDirectoryPath(
   const state = ensureSftpSessionState(sftpStates, sessionId);
   const targetDirectory = state.path;
   try {
-    const manifest = knownManifest ?? await getLocalDirectoryManifest(localPath);
+    const manifest = knownManifest ?? await scanLocalDirectory(localPath, sessionId);
+    updateRecursiveScanNotice(state, manifest);
     let remoteRoot = joinRemotePath(targetDirectory, manifest.rootName);
     const exists = state.entries.some((entry) => entry.path === remoteRoot || entry.name === manifest.rootName);
     let conflictStrategy: ConflictStrategy = "overwrite";
@@ -759,7 +803,7 @@ async function startDownload() {
     if (state) state.error = "请先选择要下载的文件或文件夹";
     return;
   }
-  if (selected.length === 1 && selected[0].kind !== "directory") {
+  if (selected.length === 1 && selected[0].kind === "file") {
     const item = selected[0];
     const localPath = await save({ title: "保存远程文件", defaultPath: item.name });
     if (!localPath) return;
@@ -770,6 +814,10 @@ async function startDownload() {
     }
     return;
   }
+  if (selected.length === 1 && selected[0].kind !== "directory") {
+    state.notice = "符号链接和不支持的远程条目不会被递归下载";
+    return;
+  }
   const localRoot = await open({ directory: true, multiple: false, title: "选择下载保存目录" });
   if (!localRoot || Array.isArray(localRoot)) return;
   const conflict = await requestConflict("批量下载中的同名文件", true);
@@ -777,27 +825,32 @@ async function startDownload() {
   const batchConflictStrategy = conflict.strategy;
   try {
     const downloads: Array<{ remotePath: string; localPath: string }> = [];
+    let skippedDirectEntries = 0;
     for (const item of selected) {
-      if (item.kind !== "directory") {
+      if (item.kind === "file") {
         downloads.push({ remotePath: item.path, localPath: joinLocalPath(localRoot, item.name) });
+        continue;
+      }
+      if (item.kind !== "directory") {
+        skippedDirectEntries += 1;
         continue;
       }
       const preparedRoot = await prepareLocalDirectory(joinLocalPath(localRoot, item.name), batchConflictStrategy);
       if (preparedRoot.skipped) continue;
-      const pending = [{ remotePath: item.path, localPath: preparedRoot.path }];
-      while (pending.length) {
-        const directory = pending.shift()!;
-        const listing = await listSftpDirectory(sessionId, directory.remotePath);
-        for (const child of listing.entries) {
-          const localPath = joinLocalPath(directory.localPath, child.name);
-          if (child.kind === "directory") {
-            await prepareLocalDirectory(localPath, "overwrite");
-            pending.push({ remotePath: child.path, localPath });
-          } else if (child.kind === "file" || child.kind === "symlink") {
-            downloads.push({ remotePath: child.path, localPath });
-          }
-        }
+      const manifest = await scanRemoteDirectory(sessionId, item.path);
+      updateRecursiveScanNotice(state, manifest);
+      for (const directory of manifest.directories) {
+        await prepareLocalDirectory(joinLocalPath(preparedRoot.path, directory), "overwrite");
       }
+      for (const file of manifest.files) {
+        downloads.push({
+          remotePath: file.remotePath,
+          localPath: joinLocalPath(preparedRoot.path, file.relativePath),
+        });
+      }
+    }
+    if (skippedDirectEntries) {
+      state.notice = `${state.notice} 已跳过 ${skippedDirectEntries} 个直接选择的链接或不支持项。`.trim();
     }
     await runWithConcurrency(downloads, (item) => downloadOne(sessionId, item.remotePath, item.localPath, batchConflictStrategy));
   } catch (error) {
@@ -1118,14 +1171,20 @@ async function handleDroppedPaths(paths: string[]) {
   const session = activeSession.value;
   if (!session?.connected || !paths.length) return;
   const sessionId = session.id;
+  const state = ensureSftpSessionState(sftpStates, sessionId);
   selectedTool.value = "files";
   const files: string[] = [];
   for (const path of paths) {
     try {
-      const manifest = await getLocalDirectoryManifest(path);
+      const manifest = await scanLocalDirectory(path, sessionId);
       await uploadDirectoryPath(path, manifest, sessionId);
-    } catch {
-      files.push(path);
+    } catch (error) {
+      if (commandErrorCode(error) === "LOCAL_DIRECTORY_INVALID") {
+        files.push(path);
+        continue;
+      }
+      state.error = describeCommandError(error);
+      return;
     }
   }
   if (files.length) await uploadFilePaths(files, sessionId);
@@ -1319,6 +1378,7 @@ onBeforeUnmount(() => {
             <button class="toolbar-button" :disabled="selectedRemoteFiles.length !== 1" @click="renameRemoteEntry">重命名</button>
             <button class="toolbar-button danger" :disabled="selectedRemoteFiles.length !== 1" @click="deleteRemoteEntry"><IconTrash :size="16" />删除</button>
           </div>
+          <div v-if="recursiveScan && recursiveScan.sessionId === activeSessionId" class="sftp-scan-status"><span>{{ recursiveScan.label }}…</span><button @click="cancelRecursiveScan">取消扫描</button></div>
           <div v-if="pendingTransferCheckpoints.length" class="transfer-queue checkpoint-queue">
             <div class="transfer-queue-heading"><span>未完成传输（{{ pendingTransferCheckpoints.length }}）</span></div>
             <div v-for="checkpoint in pendingTransferCheckpoints" :key="checkpoint.taskId" class="upload-strip failed">
@@ -1336,6 +1396,7 @@ onBeforeUnmount(() => {
             <div class="transfer-queue-heading"><span>传输队列（{{ visibleTransfers.length }}）</span><button @click="clearFinishedTransfers">清除已完成</button></div>
             <div v-for="item in visibleTransfers" :key="item.transferId" class="upload-strip" :class="item.state"><span>{{ item.direction === 'upload' ? '上传' : '下载' }} {{ item.fileName }}<small v-if="item.resumedFrom">已续传 {{ formatSize(item.resumedFrom, 'file') }}</small></span><div><i :style="{ width: `${transferProgress(item)}%` }"></i></div><span class="transfer-rate">{{ item.state === 'running' ? `${formatRate(item.speedBytesPerSecond)} · 剩余 ${formatEta(item.etaSeconds)}` : '' }}</span><strong>{{ item.state === 'completed' ? '完成' : item.state === 'failed' ? '失败' : item.state === 'cancelled' ? '已取消' : `${transferProgress(item)}%` }}</strong><button v-if="item.state === 'running'" @click="cancelTransfer(item)">取消</button><button v-else-if="item.state !== 'completed'" @click="retryTransfer(item)">重试</button></div>
           </div>
+          <div v-if="activeSftpState.notice" class="sftp-notice">{{ activeSftpState.notice }}</div>
           <div v-if="sftpError" class="sftp-error">{{ sftpError }}</div>
           <div v-if="selectedTool === 'files'" class="file-table" role="table" aria-label="远程文件">
             <div class="file-row file-header" role="row"><button @click="changeSftpSort('name')">名称</button><button @click="changeSftpSort('size')">大小</button><button @click="changeSftpSort('modifiedAt')">修改时间</button><span>权限</span></div>

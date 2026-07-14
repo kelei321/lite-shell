@@ -1,6 +1,7 @@
 mod monitor;
 mod profiles;
 mod sftp;
+mod sftp_recursive;
 mod ssh;
 
 use monitor::{system_metrics, SystemMonitor};
@@ -12,9 +13,10 @@ use profiles::{
 use sftp::{
     sftp_cancel_transfer, sftp_create_directory, sftp_delete, sftp_delete_recursive,
     sftp_delete_transfer_checkpoint, sftp_discard_transfer_checkpoint, sftp_download, sftp_list,
-    sftp_list_transfer_checkpoints, sftp_local_directory_manifest, sftp_prepare_local_directory,
-    sftp_rename, sftp_upload, SftpTransferManager,
+    sftp_list_transfer_checkpoints, sftp_prepare_local_directory, sftp_rename, sftp_upload,
+    SftpTransferManager,
 };
+use sftp_recursive::{sftp_local_directory_manifest, sftp_remote_directory_manifest};
 use ssh::{ssh_connect, ssh_connect_profile, ssh_disconnect, ssh_resize, ssh_send, SessionManager};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -49,6 +51,7 @@ pub fn run() {
             sftp_delete_transfer_checkpoint,
             sftp_discard_transfer_checkpoint,
             sftp_local_directory_manifest,
+            sftp_remote_directory_manifest,
             sftp_prepare_local_directory,
             sftp_create_directory,
             sftp_rename,

@@ -128,6 +128,18 @@ impl SftpTransferManager {
             task_id: Some(task_id.to_owned()),
         })
     }
+
+    pub(crate) async fn cancel_operation(&self, operation_id: &str) {
+        self.cancelled.lock().await.insert(operation_id.to_owned());
+    }
+
+    pub(crate) async fn operation_cancelled(&self, operation_id: &str) -> bool {
+        self.cancelled.lock().await.contains(operation_id)
+    }
+
+    pub(crate) async fn finish_operation(&self, operation_id: &str) {
+        self.cancelled.lock().await.remove(operation_id);
+    }
 }
 
 impl Default for SftpTransferManager {
@@ -139,22 +151,6 @@ impl Default for SftpTransferManager {
             slots: Semaphore::new(3),
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalDirectoryManifest {
-    root_name: String,
-    directories: Vec<String>,
-    files: Vec<LocalManifestFile>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalManifestFile {
-    absolute_path: String,
-    relative_path: String,
-    size: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -281,74 +277,8 @@ pub async fn sftp_cancel_transfer(
     if transfer_id.trim().is_empty() {
         return Err(CommandError::new("INVALID_TRANSFER", "传输标识不能为空"));
     }
-    transfers.cancelled.lock().await.insert(transfer_id);
+    transfers.cancel_operation(&transfer_id).await;
     Ok(())
-}
-
-#[tauri::command]
-pub async fn sftp_local_directory_manifest(
-    path: String,
-) -> Result<LocalDirectoryManifest, CommandError> {
-    let root = std::path::PathBuf::from(path.trim());
-    if !root.is_dir() {
-        return Err(CommandError::new(
-            "LOCAL_DIRECTORY_INVALID",
-            "本地目录不存在",
-        ));
-    }
-    let root_name = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| CommandError::new("LOCAL_DIRECTORY_INVALID", "无法识别本地目录名称"))?
-        .to_owned();
-    let mut pending = vec![root.clone()];
-    let mut directories = Vec::new();
-    let mut files = Vec::new();
-    while let Some(directory) = pending.pop() {
-        let mut entries = fs::read_dir(&directory)
-            .await
-            .map_err(|error| CommandError::new("LOCAL_DIRECTORY_READ_FAILED", error.to_string()))?;
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|error| CommandError::new("LOCAL_DIRECTORY_READ_FAILED", error.to_string()))?
-        {
-            let file_type = entry
-                .file_type()
-                .await
-                .map_err(|error| CommandError::new("LOCAL_ENTRY_READ_FAILED", error.to_string()))?;
-            let entry_path = entry.path();
-            let relative = entry_path
-                .strip_prefix(&root)
-                .map_err(|error| CommandError::new("LOCAL_PATH_FAILED", error.to_string()))?
-                .to_string_lossy()
-                .replace('\\', "/");
-            if file_type.is_dir() {
-                directories.push(relative);
-                pending.push(entry_path);
-            } else if file_type.is_file() {
-                let size = entry
-                    .metadata()
-                    .await
-                    .map_err(|error| {
-                        CommandError::new("LOCAL_FILE_READ_FAILED", error.to_string())
-                    })?
-                    .len();
-                files.push(LocalManifestFile {
-                    absolute_path: entry_path.to_string_lossy().into_owned(),
-                    relative_path: relative,
-                    size,
-                });
-            }
-        }
-    }
-    directories.sort();
-    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    Ok(LocalDirectoryManifest {
-        root_name,
-        directories,
-        files,
-    })
 }
 
 #[tauri::command]
@@ -1950,27 +1880,5 @@ mod tests {
                 .code,
             "TRANSFER_CHECKPOINT_INVALID"
         );
-    }
-
-    #[tokio::test]
-    async fn builds_local_directory_manifest() {
-        let root = std::env::temp_dir().join(format!("liteshell-sftp-test-{}", std::process::id()));
-        fs::create_dir_all(root.join("nested")).await.unwrap();
-        fs::write(root.join("root.txt"), b"root").await.unwrap();
-        fs::write(root.join("nested").join("child.txt"), b"child")
-            .await
-            .unwrap();
-
-        let manifest = sftp_local_directory_manifest(root.to_string_lossy().into_owned())
-            .await
-            .unwrap();
-        assert_eq!(manifest.files.len(), 2);
-        assert!(manifest.directories.iter().any(|path| path == "nested"));
-        assert!(manifest
-            .files
-            .iter()
-            .any(|file| file.relative_path == "nested/child.txt"));
-
-        fs::remove_dir_all(root).await.unwrap();
     }
 }
