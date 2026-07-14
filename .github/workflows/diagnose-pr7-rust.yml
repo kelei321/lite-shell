@@ -1,4 +1,4 @@
-name: Diagnose PR7 Rust
+name: Apply PR7 Rust import fix
 
 on:
   pull_request:
@@ -8,35 +8,38 @@ on:
       - reopened
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  apply:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
         with:
           ref: feat/sftp-safe-resume-checkpoint
-      - name: Set up Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-      - name: Capture Rust test output
-        id: tests
+          fetch-depth: 0
+      - name: Add missing Tokio seek trait import
         shell: pwsh
         run: |
-          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features *> rust-test.log
-          $code = $LASTEXITCODE
-          Get-Content rust-test.log | Select-Object -Last 120 | Set-Content rust-test-tail.log
-          "exit_code=$code" >> $env:GITHUB_OUTPUT
-          exit 0
-      - name: Upload diagnostic
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr7-rust-diagnostic
-          path: rust-test-tail.log
-          retention-days: 1
-      - name: Fail when tests fail
-        if: steps.tests.outputs.exit_code != '0'
-        run: exit 1
+          $path = 'src-tauri/src/sftp.rs'
+          $content = Get-Content $path -Raw
+          $old = 'io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},'
+          $new = 'io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},'
+          if (-not $content.Contains($old)) { throw 'Expected Tokio import not found' }
+          Set-Content -Path $path -Value ($content.Replace($old, $new)) -NoNewline
+          Remove-Item '.github/workflows/diagnose-pr7-rust.yml'
+      - name: Set up Rust formatter
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - name: Format Rust sources
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
+      - name: Commit fix
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: import Tokio async seek trait"
+          git push origin HEAD:feat/sftp-safe-resume-checkpoint
