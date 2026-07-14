@@ -92,7 +92,7 @@ sftp = replace_once(
             "TRANSFER_CHECKPOINT_INVALID"
         );
         let mut wrong_target = checkpoint;
-        wrong_target.target_path = "C:\\tmp\\other.txt".to_owned();
+        wrong_target.target_path = "C:\\\\tmp\\\\other.txt".to_owned();
         assert_eq!(
             validate_checkpoint_temporary_path(&wrong_target)
                 .unwrap_err()
