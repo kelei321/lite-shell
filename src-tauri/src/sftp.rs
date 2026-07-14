@@ -1271,7 +1271,8 @@ fn normalize_local_target(path: &str) -> String {
 }
 
 fn modified_seconds(value: Option<std::time::SystemTime>) -> Option<u64> {
-    value.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+    value
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs())
 }
 
@@ -1321,32 +1322,29 @@ async fn persist_transfer_checkpoint(
 ) -> Result<(), CommandError> {
     let path = checkpoint_path(app, &checkpoint.task_id)?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|error| CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string()))?;
+        fs::create_dir_all(parent).await.map_err(|error| {
+            CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string())
+        })?;
     }
     let temporary = path.with_extension("json.tmp");
     let mut persisted = checkpoint.clone();
     persisted.updated_at = unix_now();
-    let content = serde_json::to_vec_pretty(&persisted)
-        .map_err(|error| CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string()))?;
-    fs::write(&temporary, content)
-        .await
-        .map_err(|error| CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string()))?;
+    let content = serde_json::to_vec_pretty(&persisted).map_err(|error| {
+        CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string())
+    })?;
+    fs::write(&temporary, content).await.map_err(|error| {
+        CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string())
+    })?;
     if let Err(error) = fs::rename(&temporary, &path).await {
         if fs::metadata(&path).await.is_ok() {
             fs::remove_file(&path).await.map_err(|remove_error| {
-                CommandError::new(
-                    "TRANSFER_CHECKPOINT_WRITE_FAILED",
-                    remove_error.to_string(),
-                )
+                CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", remove_error.to_string())
             })?;
-            fs::rename(&temporary, &path).await.map_err(|rename_error| {
-                CommandError::new(
-                    "TRANSFER_CHECKPOINT_WRITE_FAILED",
-                    rename_error.to_string(),
-                )
-            })?;
+            fs::rename(&temporary, &path)
+                .await
+                .map_err(|rename_error| {
+                    CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", rename_error.to_string())
+                })?;
         } else {
             return Err(CommandError::new(
                 "TRANSFER_CHECKPOINT_WRITE_FAILED",
@@ -1506,9 +1504,7 @@ pub async fn sftp_discard_transfer_checkpoint(
     Ok(())
 }
 
-fn validate_checkpoint_temporary_path(
-    checkpoint: &TransferCheckpoint,
-) -> Result<(), CommandError> {
+fn validate_checkpoint_temporary_path(checkpoint: &TransferCheckpoint) -> Result<(), CommandError> {
     let suffix = format!(".liteshell-{}.part", checkpoint.task_id);
     if !checkpoint.temporary_path.ends_with(&suffix) {
         return Err(CommandError::new(
@@ -1744,7 +1740,10 @@ mod tests {
         );
         let mut saved = expected.clone();
         saved.transferred = 50;
-        assert_eq!(validate_resume_checkpoint(&saved, &expected, 75).unwrap(), 75);
+        assert_eq!(
+            validate_resume_checkpoint(&saved, &expected, 75).unwrap(),
+            75
+        );
 
         let mut changed = expected.clone();
         changed.source_modified_at = Some(11);
@@ -1765,9 +1764,11 @@ mod tests {
     #[test]
     fn validates_transfer_task_ids() {
         assert!(validate_task_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
-        assert_eq!(validate_task_id("../bad").unwrap_err().code, "INVALID_TRANSFER_TASK");
+        assert_eq!(
+            validate_task_id("../bad").unwrap_err().code,
+            "INVALID_TRANSFER_TASK"
+        );
     }
-
 
     #[test]
     fn validates_checkpoint_temporary_path_binding() {
@@ -1786,7 +1787,9 @@ mod tests {
         let mut invalid = checkpoint;
         invalid.temporary_path = "C:\\tmp\\unrelated.part".to_owned();
         assert_eq!(
-            validate_checkpoint_temporary_path(&invalid).unwrap_err().code,
+            validate_checkpoint_temporary_path(&invalid)
+                .unwrap_err()
+                .code,
             "TRANSFER_CHECKPOINT_INVALID"
         );
     }
