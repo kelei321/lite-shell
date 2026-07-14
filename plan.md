@@ -1,7 +1,7 @@
 # LiteShell SFTP 修改计划
 
 更新时间：2026-07-14  
-状态：实施进行中，PR1 已完成，PR2 已实现并待 CI/合并验证  
+状态：实施进行中，PR1～PR2 已完成，PR3 已实现并待 CI/合并验证
 执行原则：先修复数据安全和一致性问题，再完善传输可靠性，最后扩展交互功能。
 
 ## 1. 文档定位
@@ -101,8 +101,8 @@ npm run desktop
 | 顺序 | 任务 | 分支建议 | 状态 | 前置任务 |
 | --- | --- | --- | --- | --- |
 | PR1 | SFTP 会话状态隔离 | `fix/sftp-session-state-isolation` | 已完成 | 无 |
-| PR2 | 相同目标路径传输互斥 | `fix/sftp-transfer-target-lock` | 待验证 | PR1 |
-| PR3 | 文件与目录冲突保护 | `fix/sftp-entry-type-conflicts` | 待开始 | PR2 |
+| PR2 | 相同目标路径传输互斥 | `fix/sftp-transfer-target-lock` | 已完成 | PR1 |
+| PR3 | 文件与目录冲突保护 | `fix/sftp-entry-type-conflicts` | 待验证 | PR2 |
 | PR4 | 统一传输终态和清理 | `fix/sftp-transfer-finalization` | 待开始 | PR3 |
 | PR5 | 安全断点续传和任务检查点 | `feat/sftp-safe-resume-checkpoint` | 待开始 | PR4 |
 | PR6 | 递归传输和符号链接安全 | `fix/sftp-recursive-transfer-safety` | 待开始 | PR5 |
@@ -290,7 +290,7 @@ TRANSFER_TARGET_BUSY
 
 ## 7. PR3：文件与目录冲突保护
 
-状态：`待开始`
+状态：`待验证`
 
 ### 目标
 
@@ -339,7 +339,20 @@ LOCAL_TARGET_IS_FILE
 
 ### 完成记录
 
-尚未开始。
+实现内容：
+
+- 上传文件前拒绝远程同名目录，错误码 `SFTP_TARGET_IS_DIRECTORY`。
+- 下载文件前拒绝本地同名目录，错误码 `LOCAL_TARGET_IS_DIRECTORY`。
+- 创建/上传目录时拒绝同名文件，错误码 `SFTP_TARGET_IS_FILE` / `LOCAL_TARGET_IS_FILE`。
+- 上传和下载均检查 `.liteshell.part` 是否被目录占用。
+- 下载文件验证远程源不是目录。
+- 新增类型判定和本地文件/目录冲突测试。
+
+验证：等待 GitHub Actions 的 rustfmt、Rust tests、Clippy、前端类型检查和构建；未执行真实服务器写入测试。
+
+本地待测：在专用测试目录验证文件对目录、目录对文件四种冲突均不会移动、删除或覆盖原目标。
+
+下一步：PR4：统一传输终态和清理。
 
 ---
 

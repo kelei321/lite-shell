@@ -269,7 +269,11 @@ pub async fn sftp_prepare_local_directory(
             "本地目录不能为空",
         ));
     }
-    let target_path = if fs::metadata(&path).await.is_ok() {
+    let existing = fs::metadata(&path).await.ok();
+    if let Some(metadata) = &existing {
+        ensure_directory_target(metadata.is_dir(), "LOCAL_TARGET_IS_FILE", "目标路径已存在同名文件")?;
+    }
+    let target_path = if existing.is_some() {
         match conflict_strategy {
             ConflictStrategy::Overwrite => path,
             ConflictStrategy::Skip => {
@@ -358,7 +362,11 @@ pub async fn sftp_upload(
         .await
         .map_err(|_| CommandError::new("TRANSFER_QUEUE_CLOSED", "传输队列已经关闭"))?;
     let sftp = open_sftp(&manager, &session_id).await?;
-    let target_path = if sftp.metadata(remote_path.clone()).await.is_ok() {
+    let existing_target = sftp.metadata(remote_path.clone()).await.ok();
+    if let Some(metadata) = &existing_target {
+        ensure_file_target(metadata.is_dir(), "SFTP_TARGET_IS_DIRECTORY", "目标路径已存在同名目录")?;
+    }
+    let target_path = if existing_target.is_some() {
         match conflict_strategy {
             ConflictStrategy::Overwrite => remote_path,
             ConflictStrategy::Skip => {
@@ -386,6 +394,13 @@ pub async fn sftp_upload(
         .len();
     transfers.cancelled.lock().await.remove(&transfer_id);
     let temporary_path = format!("{target_path}.liteshell.part");
+    if let Ok(metadata) = sftp.metadata(temporary_path.clone()).await {
+        ensure_file_target(
+            metadata.is_dir(),
+            "SFTP_TEMPORARY_IS_DIRECTORY",
+            "传输临时路径已被同名目录占用",
+        )?;
+    }
     let resumed_from = if resume {
         sftp.metadata(temporary_path.clone())
             .await
@@ -543,7 +558,11 @@ pub async fn sftp_download(
         .await
         .map_err(|_| CommandError::new("TRANSFER_QUEUE_CLOSED", "传输队列已经关闭"))?;
     let sftp = open_sftp(&manager, &session_id).await?;
-    let target_path = if fs::metadata(&local_path).await.is_ok() {
+    let existing_target = fs::metadata(&local_path).await.ok();
+    if let Some(metadata) = &existing_target {
+        ensure_file_target(metadata.is_dir(), "LOCAL_TARGET_IS_DIRECTORY", "目标路径已存在同名目录")?;
+    }
+    let target_path = if existing_target.is_some() {
         match conflict_strategy {
             ConflictStrategy::Overwrite => local_path,
             ConflictStrategy::Skip => {
@@ -561,17 +580,29 @@ pub async fn sftp_download(
     };
     let _target_guard =
         transfers.acquire_target(TransferTargetKey::download(&session_id, &target_path))?;
-    let total = sftp
+    let source_metadata = sftp
         .metadata(remote_path.clone())
         .await
-        .map_err(sftp_error("SFTP_DOWNLOAD_METADATA_FAILED"))?
-        .len();
+        .map_err(sftp_error("SFTP_DOWNLOAD_METADATA_FAILED"))?;
+    ensure_file_target(
+        source_metadata.is_dir(),
+        "SFTP_SOURCE_IS_DIRECTORY",
+        "远程源路径是目录，不能按文件下载",
+    )?;
+    let total = source_metadata.len();
     let mut source = sftp
         .open(remote_path.clone())
         .await
         .map_err(sftp_error("SFTP_DOWNLOAD_OPEN_FAILED"))?;
     transfers.cancelled.lock().await.remove(&transfer_id);
     let temporary_path = format!("{target_path}.liteshell.part");
+    if let Ok(metadata) = fs::metadata(&temporary_path).await {
+        ensure_file_target(
+            metadata.is_dir(),
+            "LOCAL_TEMPORARY_IS_DIRECTORY",
+            "传输临时路径已被同名目录占用",
+        )?;
+    }
     let resumed_from = if resume {
         fs::metadata(&temporary_path)
             .await
@@ -720,7 +751,7 @@ pub async fn sftp_create_directory(
             Ok(())
         } else {
             Err(CommandError::new(
-                "SFTP_DIRECTORY_CONFLICT",
+                "SFTP_TARGET_IS_FILE",
                 "目标路径已存在同名文件",
             ))
         };
@@ -1047,6 +1078,31 @@ fn normalize_local_target(path: &str) -> String {
     }
 }
 
+
+fn ensure_file_target(
+    is_directory: bool,
+    code: &'static str,
+    message: &'static str,
+) -> Result<(), CommandError> {
+    if is_directory {
+        Err(CommandError::new(code, message))
+    } else {
+        Ok(())
+    }
+}
+
+fn ensure_directory_target(
+    is_directory: bool,
+    code: &'static str,
+    message: &'static str,
+) -> Result<(), CommandError> {
+    if is_directory {
+        Ok(())
+    } else {
+        Err(CommandError::new(code, message))
+    }
+}
+
 fn validate_transfer(
     local_path: &str,
     remote_path: &str,
@@ -1185,6 +1241,42 @@ mod tests {
         let first = normalize_local_target("tmp/../tmp/file.txt");
         let second = normalize_local_target("tmp/file.txt");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn rejects_incompatible_entry_types() {
+        assert_eq!(
+            ensure_file_target(true, "SFTP_TARGET_IS_DIRECTORY", "directory")
+                .unwrap_err()
+                .code,
+            "SFTP_TARGET_IS_DIRECTORY"
+        );
+        assert_eq!(
+            ensure_directory_target(false, "LOCAL_TARGET_IS_FILE", "file")
+                .unwrap_err()
+                .code,
+            "LOCAL_TARGET_IS_FILE"
+        );
+        assert!(ensure_file_target(false, "unused", "unused").is_ok());
+        assert!(ensure_directory_target(true, "unused", "unused").is_ok());
+    }
+
+    #[tokio::test]
+    async fn refuses_to_prepare_a_directory_over_an_existing_file() {
+        let target = std::env::temp_dir().join(format!(
+            "liteshell-directory-conflict-{}",
+            std::process::id()
+        ));
+        fs::write(&target, b"file").await.unwrap();
+        let error = sftp_prepare_local_directory(
+            target.to_string_lossy().into_owned(),
+            ConflictStrategy::Overwrite,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "LOCAL_TARGET_IS_FILE");
+        assert!(fs::metadata(&target).await.unwrap().is_file());
+        fs::remove_file(target).await.unwrap();
     }
 
     #[tokio::test]
