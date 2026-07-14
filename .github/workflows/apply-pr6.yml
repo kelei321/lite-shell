@@ -1,0 +1,42 @@
+name: Apply PR6 recursive safety patch
+
+on:
+  push:
+    branches:
+      - fix/sftp-recursive-transfer-safety
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/sftp-recursive-transfer-safety
+          fetch-depth: 0
+      - name: Apply PR6 patch
+        run: python scripts/apply_pr6.py
+      - name: Set up Rust formatter
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - name: Format Rust sources
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
+      - name: Commit implementation
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: secure recursive SFTP scans"
+          git push origin HEAD:fix/sftp-recursive-transfer-safety
