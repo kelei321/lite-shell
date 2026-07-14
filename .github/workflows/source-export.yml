@@ -1,0 +1,29 @@
+name: Source Export
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    name: Export source
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      - name: Upload source workspace
+        uses: actions/upload-artifact@v4
+        with:
+          name: lite-shell-source
+          path: |
+            .
+            !.git/**
+            !node_modules/**
+            !src-tauri/target/**
+          include-hidden-files: true
+          retention-days: 1
