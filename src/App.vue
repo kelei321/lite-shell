@@ -802,13 +802,13 @@ async function uploadFilePaths(
     const fileName = localPath.split(/[\\/]/).pop();
     if (!fileName) continue;
     const remotePath = joinRemotePath(targetDirectory, fileName);
-    const existing = state.entries.find((entry) => entry.name === fileName);
+    const inspection = await inspectRemotePath(sessionId, remotePath);
+    if (inspection.kind === "directory" || inspection.kind === "symlink" || inspection.kind === "other") {
+      state.error = `目标“${fileName}”是目录、链接或不支持的条目，不能作为文件覆盖`;
+      continue;
+    }
     let conflictStrategy: ConflictStrategy = "overwrite";
-    if (existing) {
-      if (existing.kind !== "file") {
-        state.error = `目标“${fileName}”是目录或不支持的条目，不能作为文件覆盖`;
-        continue;
-      }
+    if (inspection.kind === "file") {
       const choice = await chooseFileConflict(fileName, conflicts, paths.length > 1);
       if (choice === "cancel") return;
       conflictStrategy = choice;
@@ -862,13 +862,13 @@ async function uploadDirectoryPath(
     const manifest = knownManifest ?? await scanLocalDirectory(localPath, sessionId);
     updateRecursiveScanNotice(state, manifest);
     const requestedRoot = joinRemotePath(targetDirectory, manifest.rootName);
-    const existing = state.entries.find((entry) => entry.path === requestedRoot || entry.name === manifest.rootName);
-    if (existing && existing.kind !== "directory") {
-      state.error = `目标“${manifest.rootName}”已存在同名文件或不支持的条目`;
+    const rootInspection = await inspectRemotePath(sessionId, requestedRoot);
+    if (rootInspection.kind === "file" || rootInspection.kind === "symlink" || rootInspection.kind === "other") {
+      state.error = `目标“${manifest.rootName}”已存在同名文件、链接或不支持的条目`;
       return;
     }
     let directoryStrategy: DirectoryConflictStrategy = "merge";
-    if (existing) {
+    if (rootInspection.kind === "directory") {
       const choice = await chooseDirectoryConflict(manifest.rootName, conflicts, allowDirectoryAll);
       if (choice === "cancel" || choice === "skip") return;
       directoryStrategy = choice;
@@ -900,6 +900,7 @@ async function uploadDirectoryPath(
         const choice = await chooseFileConflict(file.relativePath, conflicts, true);
         if (choice === "cancel") {
           await finishPreparedDirectory(prepared, false, sessionId);
+          prepared = undefined;
           return;
         }
         conflictStrategy = choice;
@@ -907,21 +908,26 @@ async function uploadDirectoryPath(
       }
       tasks.push({ localPath: file.absolutePath, remotePath, conflictStrategy });
     }
-    try {
-      await runWithConcurrency(tasks, async (task) => {
-        const transferId = crypto.randomUUID();
-        const taskId = crypto.randomUUID();
-        const request = { taskId, direction: "upload" as const, sessionId, ...task, resume: false };
-        transferTasks.set(transferId, request);
-        const result = await uploadSftpFile({ sessionId, transferId, taskId, ...task, resume: false });
-        if (result.skipped) transferTasks.delete(transferId);
-      });
-    } catch (error) {
-      await rollbackPreparedDirectory(prepared, sessionId, error);
-    }
+    await runWithConcurrency(tasks, async (task) => {
+      const transferId = crypto.randomUUID();
+      const taskId = crypto.randomUUID();
+      const request = { taskId, direction: "upload" as const, sessionId, ...task, resume: false };
+      transferTasks.set(transferId, request);
+      const result = await uploadSftpFile({ sessionId, transferId, taskId, ...task, resume: false });
+      if (result.skipped) transferTasks.delete(transferId);
+    });
     await finishPreparedDirectory(prepared, true, sessionId);
+    prepared = undefined;
     await loadDirectory(sessionId, state.path, false);
   } catch (error) {
+    if (prepared?.replacementId) {
+      try {
+        await finishPreparedDirectory(prepared, false, sessionId);
+      } catch (rollbackError) {
+        state.error = `${describeCommandError(error)}；自动恢复原目录失败：${describeCommandError(rollbackError)}`;
+        return;
+      }
+    }
     state.error = describeCommandError(error);
   }
 }

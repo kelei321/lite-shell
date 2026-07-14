@@ -685,7 +685,7 @@ updatedAt
 
 验证：等待 GitHub Actions；未执行真实服务器写入测试。
 
-本地待测：本地目录替换、远程目录 merge/replace、远程 rename 不支持、替换中断与恢复。
+本地待测：本地目录替换、远程目录 merge/replace、远程 rename 不支持、最终 rename 切换中断与 staging/backup 残留恢复。
 
 下一步：PR8：后端统一传输队列、暂停和恢复。
 

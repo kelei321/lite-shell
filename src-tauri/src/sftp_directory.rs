@@ -740,7 +740,7 @@ async fn remote_path_kind(sftp: &SftpSession, path: &str) -> Result<&'static str
         Some((parent, name)) => (parent, name),
         None => (".", trimmed),
     };
-    if name.is_empty() || matches!(name, "." | "..") {
+    if !is_safe_remote_entry_name(name) {
         return Err(CommandError::new("INVALID_REMOTE_PATH", "远程路径名称无效"));
     }
     let canonical_parent = sftp
@@ -901,7 +901,12 @@ fn validate_replacement_id(replacement_id: &str) -> Result<(), CommandError> {
 
 fn validate_remote_directory_path(path: &str) -> Result<(), CommandError> {
     let path = path.trim();
-    if path.is_empty() || matches!(path, "/" | "." | "..") || path.contains('\0') {
+    if path.is_empty()
+        || matches!(path, "/" | "." | "..")
+        || path.contains('\0')
+        || path.contains('\\')
+        || path.split('/').any(|component| component == "..")
+    {
         return Err(CommandError::new(
             "INVALID_REMOTE_PATH",
             "不能修改空路径、根目录或相对父目录",
