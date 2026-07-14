@@ -20,23 +20,13 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
-      - name: Check and apply patch
+      - name: Inspect patch
         shell: bash
         run: |
-          if [ ! -f .agent-patch/READY ]; then
-            echo "Patch is not ready"
-            exit 0
-          fi
           cat .agent-patch/part-* > /tmp/agent.patch
+          nl -ba /tmp/agent.patch | sed -n '350,380p' > .agent-patch/error.txt
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if ! git apply --recount --check /tmp/agent.patch 2> .agent-patch/error.txt; then
-            git add .agent-patch/error.txt
-            git commit -m "chore: record patch error"
-            git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
-            exit 1
-          fi
-          git apply --recount --index /tmp/agent.patch
-          git rm -r .agent-patch
-          git commit -m "fix: isolate SFTP state by session"
+          git add .agent-patch/error.txt
+          git commit -m "chore: record patch boundary"
           git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
