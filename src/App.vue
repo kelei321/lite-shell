@@ -260,7 +260,7 @@ async function resolveConflict(strategy: ConflictValue | "cancel") {
   if (!request) return;
   if (strategy === "replace") {
     const confirmed = await ask(
-      `替换目录“${request.name}”会删除目标中源目录不存在的额外内容。原目录会先安全备份，复制失败时自动恢复。确定继续吗？`,
+      `替换目录“${request.name}”会删除目标中源目录不存在的额外内容。新内容会先写入独立临时目录，提交时再安全备份并替换原目录；复制失败不会改动原目录。确定继续吗？`,
       {
         title: "确认替换目录",
         kind: "warning",
@@ -799,7 +799,7 @@ async function uploadFilePaths(
   const targetDirectory = state.path;
   const tasks: Array<{ localPath: string; remotePath: string; conflictStrategy: ConflictStrategy }> = [];
   for (const localPath of paths) {
-    const fileName = localPath.split(/[\/]/).pop();
+    const fileName = localPath.split(/[\\/]/).pop();
     if (!fileName) continue;
     const remotePath = joinRemotePath(targetDirectory, fileName);
     const existing = state.entries.find((entry) => entry.name === fileName);
@@ -1655,7 +1655,7 @@ onBeforeUnmount(() => {
       <section class="conflict-dialog" role="dialog" aria-modal="true" :aria-label="conflictRequest.kind === 'directory' ? '同名目录处理' : '同名文件处理'">
         <header><strong>{{ conflictRequest.kind === 'directory' ? '目标中已存在同名目录' : '目标中已存在同名文件' }}</strong></header>
         <p>“{{ conflictRequest.name }}”已存在，请选择处理方式。</p>
-        <p v-if="conflictRequest.kind === 'directory'" class="conflict-explanation">合并会保留目标中的额外内容；替换会先备份原目录，并删除目标中源目录不存在的额外内容。</p>
+        <p v-if="conflictRequest.kind === 'directory'" class="conflict-explanation">合并会保留目标中的额外内容；替换会先写入独立临时目录，提交后删除目标中源目录不存在的额外内容。</p>
         <label v-if="conflictRequest.allowAll"><input v-model="conflictApplyAll" type="checkbox" />应用到本批次全部{{ conflictRequest.kind === 'directory' ? '目录' : '文件' }}冲突</label>
         <footer>
           <button @click="resolveConflict('cancel')">取消</button>
