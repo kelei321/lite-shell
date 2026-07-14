@@ -1886,7 +1886,7 @@ mod tests {
         let first = manager.acquire_task("task-a").unwrap();
         assert_eq!(
             manager.acquire_task("task-a").err().map(|error| error.code),
-            "TRANSFER_TASK_BUSY"
+            Some("TRANSFER_TASK_BUSY")
         );
         drop(first);
         assert!(manager.acquire_task("task-a").is_ok());
