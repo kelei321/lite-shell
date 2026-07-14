@@ -8,24 +8,24 @@
    357	+});
    358	+const sftpRecentPaths = computed({
    359	+  get: () => activeSftpState.value.recentPaths,
-   360	+  set: (value: string[]) => { activeSftpState.value.recentPaths = value; },
-   361	+});
-   362	+});
-   363	 const sftpSearch = ref("");
-   364	 const sftpSortKey = ref<"name" | "size" | "modifiedAt">("name");
-   365	 const sftpSortAscending = ref(true);
-   366	@@ -184,46 +228,62 @@ function resolveConflict(strategy: ConflictStrategy | "cancel") {
-   367	   conflictRequest.value = null;
-   368	 }
-   369	 
-   370	-function sftpStorageScope() {
-   371	-  const session = activeSession.value;
-   372	-  return session?.profileId ?? session?.name ?? "default";
-   373	+function sftpStorageScope(sessionId: string) {
-   374	+  const session = sessions.value.find((item) => item.id === sessionId);
-   375	+  return session?.profileId ?? session?.name ?? sessionId ?? "default";
-   376	 }
-   377	 
-   378	-function readSftpStorage(key: string) {
-   379	+function readSftpStorage(sessionId: string, key: string) {
-   380	   try {
+   360	+  set: (value: string[]) => { activeSftpState.value.recentPaths = value; },+});
+   361	 const sftpSearch = ref("");
+   362	 const sftpSortKey = ref<"name" | "size" | "modifiedAt">("name");
+   363	 const sftpSortAscending = ref(true);
+   364	@@ -184,46 +228,62 @@ function resolveConflict(strategy: ConflictStrategy | "cancel") {
+   365	   conflictRequest.value = null;
+   366	 }
+   367	 
+   368	-function sftpStorageScope() {
+   369	-  const session = activeSession.value;
+   370	-  return session?.profileId ?? session?.name ?? "default";
+   371	+function sftpStorageScope(sessionId: string) {
+   372	+  const session = sessions.value.find((item) => item.id === sessionId);
+   373	+  return session?.profileId ?? session?.name ?? sessionId ?? "default";
+   374	 }
+   375	 
+   376	-function readSftpStorage(key: string) {
+   377	+function readSftpStorage(sessionId: string, key: string) {
+   378	   try {
+   379	     const all = JSON.parse(localStorage.getItem(key) ?? "{}") as Record<string, string[]>;
+   380	-    return all[sftpStorageScope()] ?? [];
