@@ -333,6 +333,13 @@ export const disconnectSsh = (sessionId: string) =>
 export const listenSshEvents = (handler: (event: SshEvent) => void): Promise<UnlistenFn> =>
   listen<SshEvent>("ssh-event", ({ payload }) => handler(payload));
 
+export function commandErrorCode(error: unknown): string | undefined {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    return String((error as CommandError).code);
+  }
+  return undefined;
+}
+
 export function describeCommandError(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
     return String((error as CommandError).message);

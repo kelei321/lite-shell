@@ -129,10 +129,6 @@ impl SftpTransferManager {
         })
     }
 
-    pub(crate) async fn begin_operation(&self, operation_id: &str) {
-        self.cancelled.lock().await.remove(operation_id);
-    }
-
     pub(crate) async fn cancel_operation(&self, operation_id: &str) {
         self.cancelled.lock().await.insert(operation_id.to_owned());
     }

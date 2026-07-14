@@ -73,7 +73,6 @@ pub async fn sftp_local_directory_manifest(
     scan_id: String,
 ) -> Result<LocalDirectoryManifest, CommandError> {
     validate_scan_id(&scan_id)?;
-    transfers.begin_operation(&scan_id).await;
     let result = build_local_directory_manifest(Path::new(path.trim()), &transfers, &scan_id).await;
     transfers.finish_operation(&scan_id).await;
     result
@@ -88,10 +87,14 @@ pub async fn sftp_remote_directory_manifest(
     scan_id: String,
 ) -> Result<RemoteDirectoryManifest, CommandError> {
     validate_scan_id(&scan_id)?;
-    transfers.begin_operation(&scan_id).await;
-    let sftp = open_sftp(&manager, &session_id).await?;
-    let result = build_remote_directory_manifest(&sftp, path.trim(), &transfers, &scan_id).await;
-    sftp.close().await.ok();
+    let result = async {
+        let sftp = open_sftp(&manager, &session_id).await?;
+        let result =
+            build_remote_directory_manifest(&sftp, path.trim(), &transfers, &scan_id).await;
+        sftp.close().await.ok();
+        result
+    }
+    .await;
     transfers.finish_operation(&scan_id).await;
     result
 }
@@ -540,7 +543,6 @@ mod tests {
             .await
             .unwrap();
         let transfers = SftpTransferManager::default();
-        transfers.begin_operation("scan-test").await;
 
         let manifest = build_local_directory_manifest(&root, &transfers, "scan-test")
             .await
@@ -563,7 +565,6 @@ mod tests {
             std::env::temp_dir().join(format!("liteshell-recursive-cancel-{}", std::process::id()));
         fs::create_dir_all(&root).await.unwrap();
         let transfers = SftpTransferManager::default();
-        transfers.begin_operation("scan-cancel").await;
         transfers.cancel_operation("scan-cancel").await;
 
         let error = build_local_directory_manifest(&root, &transfers, "scan-cancel")
@@ -584,7 +585,6 @@ mod tests {
         fs::create_dir_all(root.join("real")).await.unwrap();
         symlink(root.join("real"), root.join("linked")).unwrap();
         let transfers = SftpTransferManager::default();
-        transfers.begin_operation("scan-link").await;
 
         let manifest = build_local_directory_manifest(&root, &transfers, "scan-link")
             .await

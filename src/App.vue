@@ -8,6 +8,7 @@ import "@xterm/xterm/css/xterm.css";
 import ConnectionManager from "./components/ConnectionManager.vue";
 import {
   cancelSftpTransfer,
+  commandErrorCode,
   connectProfile,
   connectSsh,
   createSftpDirectory,
@@ -1170,14 +1171,20 @@ async function handleDroppedPaths(paths: string[]) {
   const session = activeSession.value;
   if (!session?.connected || !paths.length) return;
   const sessionId = session.id;
+  const state = ensureSftpSessionState(sftpStates, sessionId);
   selectedTool.value = "files";
   const files: string[] = [];
   for (const path of paths) {
     try {
       const manifest = await scanLocalDirectory(path, sessionId);
       await uploadDirectoryPath(path, manifest, sessionId);
-    } catch {
-      files.push(path);
+    } catch (error) {
+      if (commandErrorCode(error) === "LOCAL_DIRECTORY_INVALID") {
+        files.push(path);
+        continue;
+      }
+      state.error = describeCommandError(error);
+      return;
     }
   }
   if (files.length) await uploadFilePaths(files, sessionId);
