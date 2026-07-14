@@ -1,0 +1,121 @@
++- `npm run test:frontend`：5 项通过。
++- `npm run typecheck`：通过。
++- `npm run validate`：等待本 PR 最终执行和 GitHub Actions 结果。
++- 未连接真实服务器，未执行任何远程写入测试。
++
++遗留与本地测试：
++
++- 需要在两个测试服务器/会话中快速切换不同目录，确认路径、列表、选择和历史保持独立。
++- 需要在目录读取延迟时切换标签，确认迟到响应不覆盖当前会话。
++- PR2 继续处理相同目标路径的传输互斥，不在本 PR 修改传输后端。
++
++下一步：PR2：相同目标路径传输互斥。
+ 
+ ---
+ 
+@@ -784,12 +807,13 @@ cancelled
+ 
+ ## 16. 当前下一步
+ 
+-下一任务：**PR1：SFTP 会话状态隔离**。
++当前任务：**PR1：SFTP 会话状态隔离**，状态为待验证。
++
++PR1 合并后下一任务：**PR2：相同目标路径传输互斥**。
+ 
+-开始 PR1 前需要：
++开始 PR2 前需要：
+ 
+-1. 从最新 `main` 创建 `fix/sftp-session-state-isolation`。
+-2. 重新检查 `App.vue` 中所有 SFTP 状态和远程写操作入口。
+-3. 设计可独立测试的 session state 模块。
+-4. 只处理会话隔离和异步请求竞态，不顺带修改传输后端。
+-5. 完成后同步更新 `plan.md`、`README.md` 和 `handoff.md`。
++1. 确认 PR1 已 squash merge 到最新 `main`。
++2. 从最新 `main` 创建 `fix/sftp-transfer-target-lock`。
++3. 只修改 SFTP 传输目标互斥及其测试，不提前处理文件/目录冲突或续传 checkpoint。
++4. 同步更新 `plan.md`、`README.md` 和 `handoff.md`。
+diff --git a/src/App.vue b/src/App.vue
+index eefd4cd..e95626b 100644
+--- a/src/App.vue
++++ b/src/App.vue
+@@ -1,5 +1,5 @@
+ <script setup lang="ts">
+-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
++import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+ import { FitAddon } from "@xterm/addon-fit";
+ import { Terminal } from "@xterm/xterm";
+ import { getCurrentWindow } from "@tauri-apps/api/window";
+@@ -39,6 +39,18 @@ import {
+   type SystemMetrics,
+   type TransferEvent,
+ } from "./services/ssh";
++import {
++  beginSftpDirectoryRequest,
++  bindSftpEntries,
++  createSftpSessionState,
++  ensureSftpSessionState,
++  finishSftpDirectoryRequest,
++  isCurrentSftpDirectoryRequest,
++  removeSftpSessionState,
++  selectionBelongsToSession,
++  type SessionSftpEntry,
++  type SftpSessionState,
++} from "./sftp/session-state";
+ import {
+   IconAdjustmentsHorizontal,
+   IconArrowDown,
+@@ -74,16 +86,48 @@ const search = ref("");
+ const statusExpanded = ref(true);
+ const sidebarCollapsed = ref(false);
+ const selectedTool = ref<"files" | "bookmarks" | "history">("files");
+-const sftpPath = ref(".");
+-const sftpEntries = ref<SftpEntry[]>([]);
+-const sftpLoading = ref(false);
+-const sftpError = ref("");
+-const selectedRemoteFiles = ref<SftpEntry[]>([]);
++const sftpStates = reactive(new Map<string, SftpSessionState>());
++const emptySftpState = reactive(createSftpSessionState(""));
++const activeSftpState = computed(() => activeSessionId.value
++  ? ensureSftpSessionState(sftpStates, activeSessionId.value)
++  : emptySftpState);
++const sftpPath = computed({
++  get: () => activeSftpState.value.path,
++  set: (value: string) => { activeSftpState.value.path = value; },
++});
++const sftpEntries = computed({
++  get: () => activeSftpState.value.entries,
++  set: (value: SessionSftpEntry[]) => { activeSftpState.value.entries = value; },
++});
++const sftpLoading = computed({
++  get: () => activeSftpState.value.loading,
++  set: (value: boolean) => { activeSftpState.value.loading = value; },
++});
++const sftpError = computed({
++  get: () => activeSftpState.value.error,
++  set: (value: string) => { activeSftpState.value.error = value; },
++});
++const selectedRemoteFiles = computed({
++  get: () => activeSftpState.value.selectedEntries,
++  set: (value: SessionSftpEntry[]) => { activeSftpState.value.selectedEntries = value; },
++});
+ const transfers = ref<TransferEvent[]>([]);
+-const sftpHistory = ref<string[]>([]);
+-const sftpHistoryIndex = ref(-1);
+-const sftpBookmarks = ref<string[]>([]);
+-const sftpRecentPaths = ref<string[]>([]);
++const sftpHistory = computed({
++  get: () => activeSftpState.value.history,
++  set: (value: string[]) => { activeSftpState.value.history = value; },
++});
++const sftpHistoryIndex = computed({
++  get: () => activeSftpState.value.historyIndex,
++  set: (value: number) => { activeSftpState.value.historyIndex = value; },
++});
++const sftpBookmarks = computed({
++  get: () => activeSftpState.value.bookmarks,
++  set: (value: string[]) => { activeSftpState.value.bookmarks = value; },
++});
++const sftpRecentPaths = computed({
++  get: () => activeSftpState.value.recentPaths,
++  set: (value: string[]) => { activeSftpState.value.recentPaths = value; },
++});
