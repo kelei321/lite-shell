@@ -74,7 +74,6 @@ impl Drop for TransferTargetGuard<'_> {
     }
 }
 
-#[derive(Debug)]
 struct TransferTaskGuard<'a> {
     manager: &'a SftpTransferManager,
     task_id: Option<String>,
@@ -1886,7 +1885,7 @@ mod tests {
         let manager = SftpTransferManager::default();
         let first = manager.acquire_task("task-a").unwrap();
         assert_eq!(
-            manager.acquire_task("task-a").unwrap_err().code,
+            manager.acquire_task("task-a").err().map(|error| error.code),
             "TRANSFER_TASK_BUSY"
         );
         drop(first);
