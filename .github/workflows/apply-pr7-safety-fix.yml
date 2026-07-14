@@ -26,6 +26,9 @@ jobs:
           ref: feat/sftp-safe-resume-checkpoint
           fetch-depth: 0
 
+      - name: Repair patch script escaping
+        run: python scripts/fix_pr7_script_escape.py
+
       - name: Apply focused safety patch
         id: apply
         shell: pwsh
