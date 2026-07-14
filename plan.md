@@ -1,7 +1,7 @@
 # LiteShell SFTP 修改计划
 
 更新时间：2026-07-14  
-状态：实施进行中，PR1 已实现并待 CI/合并验证  
+状态：实施进行中，PR1 已完成，PR2 已实现并待 CI/合并验证  
 执行原则：先修复数据安全和一致性问题，再完善传输可靠性，最后扩展交互功能。
 
 ## 1. 文档定位
@@ -100,8 +100,8 @@ npm run desktop
 
 | 顺序 | 任务 | 分支建议 | 状态 | 前置任务 |
 | --- | --- | --- | --- | --- |
-| PR1 | SFTP 会话状态隔离 | `fix/sftp-session-state-isolation` | 待验证 | 无 |
-| PR2 | 相同目标路径传输互斥 | `fix/sftp-transfer-target-lock` | 待开始 | PR1 |
+| PR1 | SFTP 会话状态隔离 | `fix/sftp-session-state-isolation` | 已完成 | 无 |
+| PR2 | 相同目标路径传输互斥 | `fix/sftp-transfer-target-lock` | 待验证 | PR1 |
 | PR3 | 文件与目录冲突保护 | `fix/sftp-entry-type-conflicts` | 待开始 | PR2 |
 | PR4 | 统一传输终态和清理 | `fix/sftp-transfer-finalization` | 待开始 | PR3 |
 | PR5 | 安全断点续传和任务检查点 | `feat/sftp-safe-resume-checkpoint` | 待开始 | PR4 |
@@ -116,7 +116,7 @@ PR1～PR5 属于可靠性和数据安全修复。在这五个 PR 合并前，不
 
 ## 5. PR1：SFTP 会话状态隔离
 
-状态：`待验证`
+状态：`已完成`
 
 ### 目标
 
@@ -212,7 +212,7 @@ src/sftp/session-state.test.ts
 
 ## 6. PR2：相同目标路径传输互斥
 
-状态：`待开始`
+状态：`待验证`
 
 ### 目标
 
@@ -263,7 +263,28 @@ TRANSFER_TARGET_BUSY
 
 ### 完成记录
 
-尚未开始。
+实现内容：
+
+- `SftpTransferManager` 新增活动目标集合，目标键由会话、传输方向和规范化目标路径组成。
+- 上传在确定最终远程目标后获取目标锁，下载在确定最终本地目标后获取目标锁。
+- 使用 RAII `TransferTargetGuard`，正常返回、错误、取消和 panic 展开都会释放目标锁。
+- 重复目标返回 `TRANSFER_TARGET_BUSY` 和明确中文提示，不同目标仍受原有三路 `Semaphore` 控制并可并发。
+- 本地路径按绝对词法路径规范化，Windows 下统一小写；远程路径折叠空段、`.` 和 `..`。
+- 新增相同目标互斥、不同目标并行和路径规范化测试。
+
+验证结果：
+
+- 前端状态测试、类型检查和生产构建沿用 PR1 基线并在本 PR 重新执行。
+- Rust 单元测试、rustfmt 和 Clippy 由 GitHub Actions 验证。
+- 未连接真实服务器，未执行远程上传或下载写入测试。
+
+遗留与本地测试：
+
+- 需要在专用测试目录中同时发起两个同目标上传，确认第二个任务显示“该目标文件已有传输任务正在运行”。
+- 需要同时下载到同一本地目标，确认不会共享 `.liteshell.part`。
+- PR3 继续处理文件与目录类型冲突。
+
+下一步：PR3：文件与目录冲突保护。
 
 ---
 
