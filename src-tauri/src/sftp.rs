@@ -271,7 +271,11 @@ pub async fn sftp_prepare_local_directory(
     }
     let existing = fs::metadata(&path).await.ok();
     if let Some(metadata) = &existing {
-        ensure_directory_target(metadata.is_dir(), "LOCAL_TARGET_IS_FILE", "目标路径已存在同名文件")?;
+        ensure_directory_target(
+            metadata.is_dir(),
+            "LOCAL_TARGET_IS_FILE",
+            "目标路径已存在同名文件",
+        )?;
     }
     let target_path = if existing.is_some() {
         match conflict_strategy {
@@ -364,7 +368,11 @@ pub async fn sftp_upload(
     let sftp = open_sftp(&manager, &session_id).await?;
     let existing_target = sftp.metadata(remote_path.clone()).await.ok();
     if let Some(metadata) = &existing_target {
-        ensure_file_target(metadata.is_dir(), "SFTP_TARGET_IS_DIRECTORY", "目标路径已存在同名目录")?;
+        ensure_file_target(
+            metadata.is_dir(),
+            "SFTP_TARGET_IS_DIRECTORY",
+            "目标路径已存在同名目录",
+        )?;
     }
     let target_path = if existing_target.is_some() {
         match conflict_strategy {
@@ -560,7 +568,11 @@ pub async fn sftp_download(
     let sftp = open_sftp(&manager, &session_id).await?;
     let existing_target = fs::metadata(&local_path).await.ok();
     if let Some(metadata) = &existing_target {
-        ensure_file_target(metadata.is_dir(), "LOCAL_TARGET_IS_DIRECTORY", "目标路径已存在同名目录")?;
+        ensure_file_target(
+            metadata.is_dir(),
+            "LOCAL_TARGET_IS_DIRECTORY",
+            "目标路径已存在同名目录",
+        )?;
     }
     let target_path = if existing_target.is_some() {
         match conflict_strategy {
@@ -1077,7 +1089,6 @@ fn normalize_local_target(path: &str) -> String {
         value
     }
 }
-
 
 fn ensure_file_target(
     is_directory: bool,
