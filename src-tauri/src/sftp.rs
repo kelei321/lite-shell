@@ -455,62 +455,56 @@ pub async fn sftp_upload(
     )
     .await;
     if let Err(error) = result {
-        return Err(
-            finish_transfer_failure(
-                &app,
-                &transfer_id,
-                &session_id,
-                "upload",
-                &display_name(&local_path),
-                0,
-                total,
-                resumed_from,
-                &transfers,
-                &sftp,
-                error,
-            )
-            .await,
-        );
+        return Err(finish_transfer_failure(
+            &app,
+            &transfer_id,
+            &session_id,
+            "upload",
+            &display_name(&local_path),
+            0,
+            total,
+            resumed_from,
+            &transfers,
+            &sftp,
+            error,
+        )
+        .await);
     }
     if let Err(error) = target.shutdown().await {
-        return Err(
-            finish_transfer_failure(
-                &app,
-                &transfer_id,
-                &session_id,
-                "upload",
-                &display_name(&local_path),
-                total,
-                total,
-                resumed_from,
-                &transfers,
-                &sftp,
-                CommandError::new("SFTP_UPLOAD_CLOSE_FAILED", error.to_string()),
-            )
-            .await,
-        );
+        return Err(finish_transfer_failure(
+            &app,
+            &transfer_id,
+            &session_id,
+            "upload",
+            &display_name(&local_path),
+            total,
+            total,
+            resumed_from,
+            &transfers,
+            &sftp,
+            CommandError::new("SFTP_UPLOAD_CLOSE_FAILED", error.to_string()),
+        )
+        .await);
     }
     let backup_path = format!("{target_path}.liteshell-{transfer_id}.backup");
     let has_original = sftp.metadata(target_path.clone()).await.is_ok();
     if has_original {
         sftp.remove_file(backup_path.clone()).await.ok();
         if let Err(error) = sftp.rename(target_path.clone(), backup_path.clone()).await {
-            return Err(
-                finish_transfer_failure(
-                    &app,
-                    &transfer_id,
-                    &session_id,
-                    "upload",
-                    &display_name(&local_path),
-                    total,
-                    total,
-                    resumed_from,
-                    &transfers,
-                    &sftp,
-                    sftp_error("SFTP_UPLOAD_BACKUP_FAILED")(error),
-                )
-                .await,
-            );
+            return Err(finish_transfer_failure(
+                &app,
+                &transfer_id,
+                &session_id,
+                "upload",
+                &display_name(&local_path),
+                total,
+                total,
+                resumed_from,
+                &transfers,
+                &sftp,
+                sftp_error("SFTP_UPLOAD_BACKUP_FAILED")(error),
+            )
+            .await);
         }
     }
     if let Err(error) = sftp
@@ -523,22 +517,20 @@ pub async fn sftp_upload(
                 .ok();
         }
         sftp.remove_file(temporary_path).await.ok();
-        return Err(
-            finish_transfer_failure(
-                &app,
-                &transfer_id,
-                &session_id,
-                "upload",
-                &display_name(&local_path),
-                total,
-                total,
-                resumed_from,
-                &transfers,
-                &sftp,
-                CommandError::new("SFTP_UPLOAD_COMMIT_FAILED", error.to_string()),
-            )
-            .await,
-        );
+        return Err(finish_transfer_failure(
+            &app,
+            &transfer_id,
+            &session_id,
+            "upload",
+            &display_name(&local_path),
+            total,
+            total,
+            resumed_from,
+            &transfers,
+            &sftp,
+            CommandError::new("SFTP_UPLOAD_COMMIT_FAILED", error.to_string()),
+        )
+        .await);
     }
     if has_original {
         sftp.remove_file(backup_path).await.ok();
@@ -677,62 +669,56 @@ pub async fn sftp_download(
     )
     .await;
     if let Err(error) = result {
-        return Err(
-            finish_transfer_failure(
-                &app,
-                &transfer_id,
-                &session_id,
-                "download",
-                &display_name(&remote_path),
-                0,
-                total,
-                resumed_from,
-                &transfers,
-                &sftp,
-                error,
-            )
-            .await,
-        );
+        return Err(finish_transfer_failure(
+            &app,
+            &transfer_id,
+            &session_id,
+            "download",
+            &display_name(&remote_path),
+            0,
+            total,
+            resumed_from,
+            &transfers,
+            &sftp,
+            error,
+        )
+        .await);
     }
     if let Err(error) = target.shutdown().await {
-        return Err(
-            finish_transfer_failure(
-                &app,
-                &transfer_id,
-                &session_id,
-                "download",
-                &display_name(&remote_path),
-                total,
-                total,
-                resumed_from,
-                &transfers,
-                &sftp,
-                CommandError::new("LOCAL_FILE_WRITE_FAILED", error.to_string()),
-            )
-            .await,
-        );
+        return Err(finish_transfer_failure(
+            &app,
+            &transfer_id,
+            &session_id,
+            "download",
+            &display_name(&remote_path),
+            total,
+            total,
+            resumed_from,
+            &transfers,
+            &sftp,
+            CommandError::new("LOCAL_FILE_WRITE_FAILED", error.to_string()),
+        )
+        .await);
     }
     let backup_path = format!("{target_path}.liteshell-{transfer_id}.backup");
     let has_original = fs::metadata(&target_path).await.is_ok();
     if has_original {
         fs::remove_file(&backup_path).await.ok();
         if let Err(error) = fs::rename(&target_path, &backup_path).await {
-            return Err(
-                finish_transfer_failure(
-                    &app,
-                    &transfer_id,
-                    &session_id,
-                    "download",
-                    &display_name(&remote_path),
-                    total,
-                    total,
-                    resumed_from,
-                    &transfers,
-                    &sftp,
-                    CommandError::new("LOCAL_FILE_BACKUP_FAILED", error.to_string()),
-                )
-                .await,
-            );
+            return Err(finish_transfer_failure(
+                &app,
+                &transfer_id,
+                &session_id,
+                "download",
+                &display_name(&remote_path),
+                total,
+                total,
+                resumed_from,
+                &transfers,
+                &sftp,
+                CommandError::new("LOCAL_FILE_BACKUP_FAILED", error.to_string()),
+            )
+            .await);
         }
     }
     if let Err(error) = fs::rename(&temporary_path, &target_path).await {
@@ -740,22 +726,20 @@ pub async fn sftp_download(
             fs::rename(&backup_path, &target_path).await.ok();
         }
         fs::remove_file(&temporary_path).await.ok();
-        return Err(
-            finish_transfer_failure(
-                &app,
-                &transfer_id,
-                &session_id,
-                "download",
-                &display_name(&remote_path),
-                total,
-                total,
-                resumed_from,
-                &transfers,
-                &sftp,
-                CommandError::new("LOCAL_FILE_COMMIT_FAILED", error.to_string()),
-            )
-            .await,
-        );
+        return Err(finish_transfer_failure(
+            &app,
+            &transfer_id,
+            &session_id,
+            "download",
+            &display_name(&remote_path),
+            total,
+            total,
+            resumed_from,
+            &transfers,
+            &sftp,
+            CommandError::new("LOCAL_FILE_COMMIT_FAILED", error.to_string()),
+        )
+        .await);
     }
     if has_original {
         fs::remove_file(backup_path).await.ok();
