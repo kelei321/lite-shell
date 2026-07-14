@@ -74,6 +74,7 @@ impl Drop for TransferTargetGuard<'_> {
     }
 }
 
+#[derive(Debug)]
 struct TransferTaskGuard<'a> {
     manager: &'a SftpTransferManager,
     task_id: Option<String>,
