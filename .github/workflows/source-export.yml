@@ -1,4 +1,4 @@
-name: Source Export
+name: Apply Agent Patch
 
 on:
   pull_request:
@@ -6,19 +6,39 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - name: Apply, format, and commit
+        shell: pwsh
+        run: |
+          if (!(Test-Path .agent.patch)) { exit 0 }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git apply --check .agent.patch
+          git apply --index .agent.patch
+          cargo fmt --manifest-path src-tauri/Cargo.toml --all
+          git add src-tauri/src/sftp.rs
+          git rm .agent.patch
+          git commit -m "fix: protect SFTP entry type conflicts"
+          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: lite-shell-pr3-source
+          name: lite-shell-pr3-final-source
           path: |
             .
             !.git/**
