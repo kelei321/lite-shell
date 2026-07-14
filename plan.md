@@ -1,7 +1,7 @@
 # LiteShell SFTP 修改计划
 
 更新时间：2026-07-14  
-状态：规划已建立，功能实施尚未开始  
+状态：实施进行中，PR1 已实现并待 CI/合并验证  
 执行原则：先修复数据安全和一致性问题，再完善传输可靠性，最后扩展交互功能。
 
 ## 1. 文档定位
@@ -100,7 +100,7 @@ npm run desktop
 
 | 顺序 | 任务 | 分支建议 | 状态 | 前置任务 |
 | --- | --- | --- | --- | --- |
-| PR1 | SFTP 会话状态隔离 | `fix/sftp-session-state-isolation` | 待开始 | 无 |
+| PR1 | SFTP 会话状态隔离 | `fix/sftp-session-state-isolation` | 待验证 | 无 |
 | PR2 | 相同目标路径传输互斥 | `fix/sftp-transfer-target-lock` | 待开始 | PR1 |
 | PR3 | 文件与目录冲突保护 | `fix/sftp-entry-type-conflicts` | 待开始 | PR2 |
 | PR4 | 统一传输终态和清理 | `fix/sftp-transfer-finalization` | 待开始 | PR3 |
@@ -116,7 +116,7 @@ PR1～PR5 属于可靠性和数据安全修复。在这五个 PR 合并前，不
 
 ## 5. PR1：SFTP 会话状态隔离
 
-状态：`待开始`
+状态：`待验证`
 
 ### 目标
 
@@ -183,7 +183,30 @@ src/sftp/session-state.test.ts
 
 ### 完成记录
 
-尚未开始。
+实现内容：
+
+- 新增 `src/sftp/session-state.ts`，集中定义 `SftpSessionState`、会话状态 Map、请求版本守卫、会话绑定条目和状态清理逻辑。
+- `App.vue` 的路径、列表、loading、错误、选中项、历史、书签和最近路径改为按 `sessionId` 隔离。
+- `loadDirectory` 显式接收 `sessionId`；只有当前会话状态对象和 `requestVersion` 仍匹配时才写回结果或关闭 loading。
+- 目录条目附带所属 `sessionId`；下载、重命名、删除及上传目标目录均使用捕获的会话状态。
+- 切换标签恢复各自路径和历史并在后台刷新；关闭会话使迟到响应失效并清理状态。
+- 新增 `src/sftp/session-state.test.mjs`，使用 Node.js 原生测试运行器覆盖状态隔离、旧请求、迟到响应和选择归属。
+- `package.json` 增加 `test:frontend`，`test` 同时运行前端和 Rust 测试。
+
+验证结果：
+
+- `npm run test:frontend`：5 项通过。
+- `npm run typecheck`：通过。
+- `npm run validate`：等待本 PR 最终执行和 GitHub Actions 结果。
+- 未连接真实服务器，未执行任何远程写入测试。
+
+遗留与本地测试：
+
+- 需要在两个测试服务器/会话中快速切换不同目录，确认路径、列表、选择和历史保持独立。
+- 需要在目录读取延迟时切换标签，确认迟到响应不覆盖当前会话。
+- PR2 继续处理相同目标路径的传输互斥，不在本 PR 修改传输后端。
+
+下一步：PR2：相同目标路径传输互斥。
 
 ---
 
@@ -784,12 +807,13 @@ cancelled
 
 ## 16. 当前下一步
 
-下一任务：**PR1：SFTP 会话状态隔离**。
+当前任务：**PR1：SFTP 会话状态隔离**，状态为待验证。
 
-开始 PR1 前需要：
+PR1 合并后下一任务：**PR2：相同目标路径传输互斥**。
 
-1. 从最新 `main` 创建 `fix/sftp-session-state-isolation`。
-2. 重新检查 `App.vue` 中所有 SFTP 状态和远程写操作入口。
-3. 设计可独立测试的 session state 模块。
-4. 只处理会话隔离和异步请求竞态，不顺带修改传输后端。
-5. 完成后同步更新 `plan.md`、`README.md` 和 `handoff.md`。
+开始 PR2 前需要：
+
+1. 确认 PR1 已 squash merge 到最新 `main`。
+2. 从最新 `main` 创建 `fix/sftp-transfer-target-lock`。
+3. 只修改 SFTP 传输目标互斥及其测试，不提前处理文件/目录冲突或续传 checkpoint。
+4. 同步更新 `plan.md`、`README.md` 和 `handoff.md`。
