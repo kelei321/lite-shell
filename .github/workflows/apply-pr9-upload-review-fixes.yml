@@ -1,0 +1,63 @@
+name: Apply PR9 upload rollback fixes
+
+on:
+  push:
+    branches:
+      - feat/sftp-directory-conflict-strategies
+  pull_request:
+    branches:
+      - main
+    types:
+      - reopened
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feat/sftp-directory-conflict-strategies
+          fetch-depth: 0
+      - name: Validate review script
+        run: python -c "import ast, pathlib; p='scripts/apply_pr9_upload_review_fixes.py'; ast.parse(pathlib.Path(p).read_text(encoding='utf-8'), filename=p)"
+      - name: Apply upload rollback fixes
+        id: apply
+        shell: pwsh
+        run: |
+          python scripts/apply_pr9_upload_review_fixes.py *> pr9-upload-fix.log
+          $code = $LASTEXITCODE
+          Get-Content pr9-upload-fix.log | Select-Object -Last 80
+          "exit_code=$code" >> $env:GITHUB_OUTPUT
+          exit 0
+      - name: Upload diagnostic
+        if: steps.apply.outputs.exit_code != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr9-upload-fix-diagnostic
+          path: pr9-upload-fix.log
+          retention-days: 1
+      - name: Stop after fix failure
+        if: steps.apply.outputs.exit_code != '0'
+        run: exit 1
+      - name: Set up Rust formatter
+        if: steps.apply.outputs.exit_code == '0'
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - name: Format Rust sources
+        if: steps.apply.outputs.exit_code == '0'
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
+      - name: Commit review fixes
+        if: steps.apply.outputs.exit_code == '0'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: validate upload conflicts and rollback replacements"
+          git push origin HEAD:feat/sftp-directory-conflict-strategies
