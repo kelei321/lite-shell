@@ -177,6 +177,15 @@ export type TransferEvent = {
 };
 
 export type ConflictStrategy = "overwrite" | "skip" | "rename";
+export type DirectoryConflictStrategy = "merge" | "skip" | "rename" | "replace";
+export type LocalPathKind = "missing" | "file" | "directory" | "symlink" | "other";
+
+export type DirectoryPrepareResult = {
+  path: string;
+  skipped: boolean;
+  existed: boolean;
+  replacementId?: string;
+};
 
 export type TransferResult = {
   path: string;
@@ -300,8 +309,35 @@ export const getLocalDirectoryManifest = (path: string, scanId: string) =>
 export const getRemoteDirectoryManifest = (sessionId: string, path: string, scanId: string) =>
   invoke<RemoteDirectoryManifest>("sftp_remote_directory_manifest", { sessionId, path, scanId });
 
-export const prepareLocalDirectory = (path: string, conflictStrategy: ConflictStrategy = "overwrite") =>
-  invoke<TransferResult>("sftp_prepare_local_directory", { path, conflictStrategy });
+export const inspectLocalPath = (path: string) =>
+  invoke<{ kind: LocalPathKind }>("sftp_inspect_local_path", { path });
+
+export const inspectRemotePath = (sessionId: string, path: string) =>
+  invoke<{ kind: LocalPathKind }>("sftp_inspect_remote_path", { sessionId, path });
+
+export const prepareLocalDirectory = (
+  path: string,
+  conflictStrategy: DirectoryConflictStrategy = "merge",
+  replacementId?: string,
+) => invoke<DirectoryPrepareResult>("sftp_prepare_local_directory", { path, conflictStrategy, replacementId });
+
+export const prepareRemoteDirectory = (
+  sessionId: string,
+  path: string,
+  conflictStrategy: DirectoryConflictStrategy = "merge",
+  replacementId?: string,
+) => invoke<DirectoryPrepareResult>("sftp_prepare_remote_directory", {
+  sessionId,
+  path,
+  conflictStrategy,
+  replacementId,
+});
+
+export const finishDirectoryReplacement = (
+  replacementId: string,
+  commit: boolean,
+  sessionId?: string,
+) => invoke<void>("sftp_finish_directory_replacement", { replacementId, commit, sessionId });
 
 export const createSftpDirectory = (sessionId: string, path: string) =>
   invoke<void>("sftp_create_directory", { sessionId, path });

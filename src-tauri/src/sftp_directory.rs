@@ -38,6 +38,12 @@ pub struct LocalPathInspection {
     kind: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemotePathInspection {
+    kind: &'static str,
+}
+
 #[derive(Debug, Clone)]
 enum DirectoryReplacement {
     Local {
@@ -85,15 +91,13 @@ impl DirectoryReplacementManager {
                 "目录替换状态不可用，请稍后重试",
             )
         })?;
-        if transactions
-            .insert(replacement_id.to_owned(), replacement)
-            .is_some()
-        {
+        if transactions.contains_key(replacement_id) {
             return Err(CommandError::new(
                 "DIRECTORY_REPLACEMENT_BUSY",
                 "该目录替换任务已经存在",
             ));
         }
+        transactions.insert(replacement_id.to_owned(), replacement);
         Ok(())
     }
 
@@ -144,6 +148,21 @@ pub async fn sftp_inspect_local_path(path: String) -> Result<LocalPathInspection
             error.to_string(),
         )),
     }
+}
+
+#[tauri::command]
+pub async fn sftp_inspect_remote_path(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    path: String,
+) -> Result<RemotePathInspection, CommandError> {
+    validate_remote_directory_path(&path)?;
+    let sftp = open_sftp(&manager, &session_id).await?;
+    let result = remote_path_kind(&sftp, path.trim())
+        .await
+        .map(|kind| RemotePathInspection { kind });
+    sftp.close().await.ok();
+    result
 }
 
 #[tauri::command]
@@ -307,10 +326,7 @@ async fn prepare_local_directory(
         }
         DirectoryConflictStrategy::Replace => {
             let replacement_id = replacement_id.ok_or_else(|| {
-                CommandError::new(
-                    "INVALID_DIRECTORY_REPLACEMENT",
-                    "目录替换标识不能为空",
-                )
+                CommandError::new("INVALID_DIRECTORY_REPLACEMENT", "目录替换标识不能为空")
             })?;
             replacements.ensure_available(replacement_id)?;
             let backup = local_backup_path(&target, replacement_id)?;
@@ -364,16 +380,14 @@ async fn prepare_remote_directory(
     strategy: DirectoryConflictStrategy,
     replacement_id: Option<&str>,
 ) -> Result<DirectoryPrepareResult, CommandError> {
-    let existing = remote_metadata(sftp, path).await?;
-    if let Some(metadata) = &existing {
-        if !metadata.is_dir() {
-            return Err(CommandError::new(
-                "SFTP_TARGET_IS_FILE",
-                "目标路径已存在同名文件",
-            ));
-        }
+    let existing_kind = remote_path_kind(sftp, path).await?;
+    if !matches!(existing_kind, "missing" | "directory") {
+        return Err(CommandError::new(
+            "SFTP_TARGET_IS_NOT_DIRECTORY",
+            "目标路径已存在同名文件、符号链接或不支持的条目",
+        ));
     }
-    let existed = existing.is_some();
+    let existed = existing_kind == "directory";
     if !existed {
         sftp.create_dir(path.to_owned())
             .await
@@ -413,14 +427,11 @@ async fn prepare_remote_directory(
         }
         DirectoryConflictStrategy::Replace => {
             let replacement_id = replacement_id.ok_or_else(|| {
-                CommandError::new(
-                    "INVALID_DIRECTORY_REPLACEMENT",
-                    "目录替换标识不能为空",
-                )
+                CommandError::new("INVALID_DIRECTORY_REPLACEMENT", "目录替换标识不能为空")
             })?;
             replacements.ensure_available(replacement_id)?;
             let backup = remote_backup_path(path, replacement_id)?;
-            if remote_metadata(sftp, &backup).await?.is_some() {
+            if remote_path_kind(sftp, &backup).await? != "missing" {
                 return Err(CommandError::new(
                     "SFTP_DIRECTORY_BACKUP_EXISTS",
                     "远程目录替换备份路径已经存在，请先处理残留备份",
@@ -486,9 +497,9 @@ async fn finish_local_replacement(
             ))
         }
     }
-    fs::rename(backup, target).await.map_err(|error| {
-        CommandError::new("LOCAL_DIRECTORY_RESTORE_FAILED", error.to_string())
-    })
+    fs::rename(backup, target)
+        .await
+        .map_err(|error| CommandError::new("LOCAL_DIRECTORY_RESTORE_FAILED", error.to_string()))
 }
 
 async fn finish_remote_replacement(
@@ -555,19 +566,40 @@ async fn remove_remote_directory_recursive(
     Ok(())
 }
 
-async fn remote_metadata(
-    sftp: &SftpSession,
-    path: &str,
-) -> Result<Option<std::fs::Metadata>, CommandError> {
-    match sftp.metadata(path.to_owned()).await {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(SftpClientError::Status(status))
-            if status.status_code == StatusCode::NoSuchFile =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(sftp_error("SFTP_DIRECTORY_READ_FAILED")(error)),
+async fn remote_path_kind(sftp: &SftpSession, path: &str) -> Result<&'static str, CommandError> {
+    let trimmed = path.trim_end_matches('/');
+    let (parent, name) = match trimmed.rsplit_once('/') {
+        Some(("", name)) => ("/", name),
+        Some((parent, name)) => (parent, name),
+        None => (".", trimmed),
+    };
+    if name.is_empty() || matches!(name, "." | "..") {
+        return Err(CommandError::new("INVALID_REMOTE_PATH", "远程路径名称无效"));
     }
+    let canonical_parent = sftp
+        .canonicalize(parent)
+        .await
+        .map_err(sftp_error("SFTP_DIRECTORY_PARENT_FAILED"))?;
+    let entries = sftp
+        .read_dir(canonical_parent)
+        .await
+        .map_err(sftp_error("SFTP_DIRECTORY_READ_FAILED"))?;
+    for entry in entries {
+        if entry.file_name() != name {
+            continue;
+        }
+        let file_type = entry.file_type();
+        return Ok(if file_type.is_symlink() {
+            "symlink"
+        } else if file_type.is_dir() {
+            "directory"
+        } else if file_type.is_file() {
+            "file"
+        } else {
+            "other"
+        });
+    }
+    Ok("missing")
 }
 
 async fn unique_local_directory_path(path: &Path) -> Result<PathBuf, CommandError> {
@@ -609,7 +641,7 @@ async fn unique_remote_directory_path(
         } else {
             format!("{parent}/{candidate_name}")
         };
-        if remote_metadata(sftp, &candidate).await?.is_none() {
+        if remote_path_kind(sftp, &candidate).await? == "missing" {
             return Ok(candidate);
         }
     }
@@ -624,9 +656,7 @@ fn local_backup_path(target: &Path, replacement_id: &str) -> Result<PathBuf, Com
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| CommandError::new("LOCAL_DIRECTORY_INVALID", "无法识别目录名称"))?;
-    Ok(target.with_file_name(format!(
-        "{name}.liteshell-dir-backup-{replacement_id}"
-    )))
+    Ok(target.with_file_name(format!("{name}.liteshell-dir-backup-{replacement_id}")))
 }
 
 fn remote_backup_path(path: &str, replacement_id: &str) -> Result<String, CommandError> {
@@ -784,7 +814,9 @@ mod tests {
         .await
         .unwrap();
         fs::write(target.join("new.txt"), b"new").await.unwrap();
-        let replacement = replacements.get(result.replacement_id.as_deref().unwrap()).unwrap();
+        let replacement = replacements
+            .get(result.replacement_id.as_deref().unwrap())
+            .unwrap();
         let DirectoryReplacement::Local { target, backup } = replacement else {
             panic!("expected local replacement");
         };
@@ -811,7 +843,9 @@ mod tests {
         .await
         .unwrap();
         fs::write(target.join("new.txt"), b"new").await.unwrap();
-        let replacement = replacements.get(result.replacement_id.as_deref().unwrap()).unwrap();
+        let replacement = replacements
+            .get(result.replacement_id.as_deref().unwrap())
+            .unwrap();
         let DirectoryReplacement::Local { target, backup } = replacement else {
             panic!("expected local replacement");
         };

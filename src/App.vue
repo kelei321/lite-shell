@@ -20,14 +20,18 @@ import {
   describeCommandError,
   downloadSftpFile,
   fetchSystemMetrics,
+  finishDirectoryReplacement,
   getLocalDirectoryManifest,
   getRemoteDirectoryManifest,
   disconnectSsh,
+  inspectLocalPath,
+  inspectRemotePath,
   isTauri,
   listProfiles,
   listSftpDirectory,
   listSftpTransferCheckpoints,
   prepareLocalDirectory,
+  prepareRemoteDirectory,
   listenSftpTransfers,
   listenSshEvents,
   resizeSsh,
@@ -37,6 +41,8 @@ import {
   uploadSftpFile,
   type ConnectionProfile,
   type ConflictStrategy,
+  type DirectoryConflictStrategy,
+  type DirectoryPrepareResult,
   type LocalDirectoryManifest,
   type RecursiveScanSummary,
   type RemoteDirectoryManifest,
@@ -142,7 +148,19 @@ const sftpSearch = ref("");
 const sftpSortKey = ref<"name" | "size" | "modifiedAt">("name");
 const sftpSortAscending = ref(true);
 const sftpDragActive = ref(false);
-const conflictRequest = ref<{ name: string; allowAll: boolean; resolve: (result: { strategy: ConflictStrategy | "cancel"; applyAll: boolean }) => void } | null>(null);
+type ConflictKind = "file" | "directory";
+type ConflictValue = ConflictStrategy | DirectoryConflictStrategy;
+type ConflictResolution = { strategy: ConflictValue | "cancel"; applyAll: boolean };
+type ConflictBatchContext = {
+  fileStrategy: ConflictStrategy | null;
+  directoryStrategy: DirectoryConflictStrategy | null;
+};
+const conflictRequest = ref<{
+  kind: ConflictKind;
+  name: string;
+  allowAll: boolean;
+  resolve: (result: ConflictResolution) => void;
+} | null>(null);
 const conflictApplyAll = ref(false);
 const refreshedAt = ref("刚刚");
 const systemMetrics = ref<SystemMetrics | null>(null);
@@ -226,18 +244,90 @@ function changeSftpSort(key: typeof sftpSortKey.value) {
   }
 }
 
-function requestConflict(name: string, allowAll = false) {
+function createConflictBatchContext(): ConflictBatchContext {
+  return { fileStrategy: null, directoryStrategy: null };
+}
+
+function requestConflict(kind: ConflictKind, name: string, allowAll = false) {
   conflictApplyAll.value = false;
-  return new Promise<{ strategy: ConflictStrategy | "cancel"; applyAll: boolean }>((resolve) => {
-    conflictRequest.value = { name, allowAll, resolve };
+  return new Promise<ConflictResolution>((resolve) => {
+    conflictRequest.value = { kind, name, allowAll, resolve };
   });
 }
 
-function resolveConflict(strategy: ConflictStrategy | "cancel") {
+async function resolveConflict(strategy: ConflictValue | "cancel") {
   const request = conflictRequest.value;
   if (!request) return;
+  if (strategy === "replace") {
+    const confirmed = await ask(
+      `替换目录“${request.name}”会删除目标中源目录不存在的额外内容。原目录会先安全备份，复制失败时自动恢复。确定继续吗？`,
+      {
+        title: "确认替换目录",
+        kind: "warning",
+        okLabel: "替换目录",
+        cancelLabel: "返回",
+      },
+    );
+    if (!confirmed) return;
+  }
   request.resolve({ strategy, applyAll: request.allowAll && conflictApplyAll.value });
   conflictRequest.value = null;
+}
+
+async function chooseFileConflict(
+  name: string,
+  context: ConflictBatchContext,
+  allowAll: boolean,
+): Promise<ConflictStrategy | "cancel"> {
+  if (context.fileStrategy) return context.fileStrategy;
+  const result = await requestConflict("file", name, allowAll);
+  if (result.strategy === "cancel") return "cancel";
+  if (!(["overwrite", "skip", "rename"] as ConflictValue[]).includes(result.strategy)) {
+    throw new Error("文件冲突策略无效");
+  }
+  const strategy = result.strategy as ConflictStrategy;
+  if (result.applyAll) context.fileStrategy = strategy;
+  return strategy;
+}
+
+async function chooseDirectoryConflict(
+  name: string,
+  context: ConflictBatchContext,
+  allowAll: boolean,
+): Promise<DirectoryConflictStrategy | "cancel"> {
+  if (context.directoryStrategy) return context.directoryStrategy;
+  const result = await requestConflict("directory", name, allowAll);
+  if (result.strategy === "cancel") return "cancel";
+  if (!(["merge", "skip", "rename", "replace"] as ConflictValue[]).includes(result.strategy)) {
+    throw new Error("目录冲突策略无效");
+  }
+  const strategy = result.strategy as DirectoryConflictStrategy;
+  if (result.applyAll) context.directoryStrategy = strategy;
+  return strategy;
+}
+
+async function finishPreparedDirectory(
+  prepared: DirectoryPrepareResult | undefined,
+  commit: boolean,
+  sessionId?: string,
+) {
+  if (!prepared?.replacementId) return;
+  await finishDirectoryReplacement(prepared.replacementId, commit, sessionId);
+}
+
+async function rollbackPreparedDirectory(
+  prepared: DirectoryPrepareResult | undefined,
+  sessionId: string | undefined,
+  cause: unknown,
+): Promise<never> {
+  if (prepared?.replacementId) {
+    try {
+      await finishPreparedDirectory(prepared, false, sessionId);
+    } catch (rollbackError) {
+      throw new Error(`${describeCommandError(cause)}；自动恢复原目录失败：${describeCommandError(rollbackError)}`);
+    }
+  }
+  throw cause;
 }
 
 function sftpStorageScope(sessionId: string) {
@@ -698,27 +788,30 @@ async function startUpload() {
   await uploadFilePaths(paths, sessionId);
 }
 
-async function uploadFilePaths(paths: string[], sessionId = activeSessionId.value) {
+async function uploadFilePaths(
+  paths: string[],
+  sessionId = activeSessionId.value,
+  conflicts = createConflictBatchContext(),
+) {
   const session = sessions.value.find((item) => item.id === sessionId);
   if (!session?.connected) return;
   const state = ensureSftpSessionState(sftpStates, sessionId);
   const targetDirectory = state.path;
   const tasks: Array<{ localPath: string; remotePath: string; conflictStrategy: ConflictStrategy }> = [];
-  let batchStrategy: ConflictStrategy | null = null;
   for (const localPath of paths) {
-    const fileName = localPath.split(/[\\/]/).pop();
+    const fileName = localPath.split(/[\/]/).pop();
     if (!fileName) continue;
     const remotePath = joinRemotePath(targetDirectory, fileName);
-    const exists = state.entries.some((entry) => entry.name === fileName);
+    const existing = state.entries.find((entry) => entry.name === fileName);
     let conflictStrategy: ConflictStrategy = "overwrite";
-    if (exists) {
-      if (batchStrategy) conflictStrategy = batchStrategy;
-      else {
-        const choice = await requestConflict(fileName, paths.length > 1);
-        if (choice.strategy === "cancel") return;
-        conflictStrategy = choice.strategy;
-        if (choice.applyAll) batchStrategy = conflictStrategy;
+    if (existing) {
+      if (existing.kind !== "file") {
+        state.error = `目标“${fileName}”是目录或不支持的条目，不能作为文件覆盖`;
+        continue;
       }
+      const choice = await chooseFileConflict(fileName, conflicts, paths.length > 1);
+      if (choice === "cancel") return;
+      conflictStrategy = choice;
       if (conflictStrategy === "skip") continue;
     }
     tasks.push({ localPath, remotePath, conflictStrategy });
@@ -744,53 +837,160 @@ async function startUploadDirectory() {
   const sessionId = session.id;
   const localPath = await open({ directory: true, multiple: false, title: "选择要上传的文件夹" });
   if (!localPath || Array.isArray(localPath)) return;
-  await uploadDirectoryPath(localPath, undefined, sessionId);
+  await uploadDirectoryPath(
+    localPath,
+    undefined,
+    sessionId,
+    createConflictBatchContext(),
+    false,
+  );
 }
 
 async function uploadDirectoryPath(
   localPath: string,
   knownManifest?: LocalDirectoryManifest,
   sessionId = activeSessionId.value,
+  conflicts = createConflictBatchContext(),
+  allowDirectoryAll = false,
 ) {
   const session = sessions.value.find((item) => item.id === sessionId);
   if (!session?.connected) return;
   const state = ensureSftpSessionState(sftpStates, sessionId);
   const targetDirectory = state.path;
+  let prepared: DirectoryPrepareResult | undefined;
   try {
     const manifest = knownManifest ?? await scanLocalDirectory(localPath, sessionId);
     updateRecursiveScanNotice(state, manifest);
-    let remoteRoot = joinRemotePath(targetDirectory, manifest.rootName);
-    const exists = state.entries.some((entry) => entry.path === remoteRoot || entry.name === manifest.rootName);
-    let conflictStrategy: ConflictStrategy = "overwrite";
-    if (exists) {
-      const choice = await requestConflict(manifest.rootName);
-      if (choice.strategy === "cancel" || choice.strategy === "skip") return;
-      conflictStrategy = choice.strategy;
-      if (choice.strategy === "rename") {
-        const names = new Set(state.entries.map((entry) => entry.name));
-        let index = 1;
-        let name = `${manifest.rootName} (${index})`;
-        while (names.has(name)) name = `${manifest.rootName} (${++index})`;
-        remoteRoot = joinRemotePath(targetDirectory, name);
-        conflictStrategy = "overwrite";
-      }
+    const requestedRoot = joinRemotePath(targetDirectory, manifest.rootName);
+    const existing = state.entries.find((entry) => entry.path === requestedRoot || entry.name === manifest.rootName);
+    if (existing && existing.kind !== "directory") {
+      state.error = `目标“${manifest.rootName}”已存在同名文件或不支持的条目`;
+      return;
     }
-    await createSftpDirectory(sessionId, remoteRoot);
+    let directoryStrategy: DirectoryConflictStrategy = "merge";
+    if (existing) {
+      const choice = await chooseDirectoryConflict(manifest.rootName, conflicts, allowDirectoryAll);
+      if (choice === "cancel" || choice === "skip") return;
+      directoryStrategy = choice;
+    }
+    prepared = await prepareRemoteDirectory(
+      sessionId,
+      requestedRoot,
+      directoryStrategy,
+      directoryStrategy === "replace" ? crypto.randomUUID() : undefined,
+    );
+    if (prepared.skipped) return;
+
     for (const directory of manifest.directories) {
-      await createSftpDirectory(sessionId, joinRemotePath(remoteRoot, directory));
+      await prepareRemoteDirectory(sessionId, joinRemotePath(prepared.path, directory), "merge");
     }
-    await runWithConcurrency(manifest.files, async (file) => {
-      const transferId = crypto.randomUUID();
-      const taskId = crypto.randomUUID();
-      const remotePath = joinRemotePath(remoteRoot, file.relativePath);
-      const request = { taskId, direction: "upload" as const, sessionId, localPath: file.absolutePath, remotePath, conflictStrategy, resume: false };
-      transferTasks.set(transferId, request);
-      const result = await uploadSftpFile({ sessionId, localPath: file.absolutePath, remotePath, transferId, taskId, conflictStrategy, resume: false });
-      if (result.skipped) transferTasks.delete(transferId);
-    });
+    const tasks: Array<{
+      localPath: string;
+      remotePath: string;
+      conflictStrategy: ConflictStrategy;
+    }> = [];
+    for (const file of manifest.files) {
+      const remotePath = joinRemotePath(prepared.path, file.relativePath);
+      const inspection = await inspectRemotePath(sessionId, remotePath);
+      if (inspection.kind === "directory" || inspection.kind === "symlink" || inspection.kind === "other") {
+        throw new Error(`远程目标“${file.relativePath}”已存在同名目录、链接或不支持的条目`);
+      }
+      let conflictStrategy: ConflictStrategy = "overwrite";
+      if (inspection.kind === "file") {
+        const choice = await chooseFileConflict(file.relativePath, conflicts, true);
+        if (choice === "cancel") {
+          await finishPreparedDirectory(prepared, false, sessionId);
+          return;
+        }
+        conflictStrategy = choice;
+        if (choice === "skip") continue;
+      }
+      tasks.push({ localPath: file.absolutePath, remotePath, conflictStrategy });
+    }
+    try {
+      await runWithConcurrency(tasks, async (task) => {
+        const transferId = crypto.randomUUID();
+        const taskId = crypto.randomUUID();
+        const request = { taskId, direction: "upload" as const, sessionId, ...task, resume: false };
+        transferTasks.set(transferId, request);
+        const result = await uploadSftpFile({ sessionId, transferId, taskId, ...task, resume: false });
+        if (result.skipped) transferTasks.delete(transferId);
+      });
+    } catch (error) {
+      await rollbackPreparedDirectory(prepared, sessionId, error);
+    }
+    await finishPreparedDirectory(prepared, true, sessionId);
     await loadDirectory(sessionId, state.path, false);
   } catch (error) {
     state.error = describeCommandError(error);
+  }
+}
+
+async function downloadDirectoryItem(
+  sessionId: string,
+  state: SftpSessionState,
+  item: SessionSftpEntry,
+  localRoot: string,
+  conflicts: ConflictBatchContext,
+  allowDirectoryAll: boolean,
+) {
+  const targetPath = joinLocalPath(localRoot, item.name);
+  const inspection = await inspectLocalPath(targetPath);
+  if (inspection.kind === "file" || inspection.kind === "other") {
+    throw new Error(`本地目标“${item.name}”已存在同名文件、链接或不支持的条目`);
+  }
+  let directoryStrategy: DirectoryConflictStrategy = "merge";
+  if (inspection.kind === "directory") {
+    const choice = await chooseDirectoryConflict(item.name, conflicts, allowDirectoryAll);
+    if (choice === "cancel") return false;
+    if (choice === "skip") return true;
+    directoryStrategy = choice;
+  }
+  const prepared = await prepareLocalDirectory(
+    targetPath,
+    directoryStrategy,
+    directoryStrategy === "replace" ? crypto.randomUUID() : undefined,
+  );
+  if (prepared.skipped) return true;
+  try {
+    const manifest = await scanRemoteDirectory(sessionId, item.path);
+    updateRecursiveScanNotice(state, manifest);
+    for (const directory of manifest.directories) {
+      await prepareLocalDirectory(joinLocalPath(prepared.path, directory), "merge");
+    }
+    const downloads: Array<{
+      remotePath: string;
+      localPath: string;
+      conflictStrategy: ConflictStrategy;
+    }> = [];
+    for (const file of manifest.files) {
+      const localPath = joinLocalPath(prepared.path, file.relativePath);
+      const inspection = await inspectLocalPath(localPath);
+      if (inspection.kind === "directory" || inspection.kind === "other") {
+        throw new Error(`本地目标“${file.relativePath}”已存在同名目录、链接或不支持的条目`);
+      }
+      let conflictStrategy: ConflictStrategy = "overwrite";
+      if (inspection.kind === "file") {
+        const choice = await chooseFileConflict(file.relativePath, conflicts, true);
+        if (choice === "cancel") {
+          await finishPreparedDirectory(prepared, false);
+          return false;
+        }
+        conflictStrategy = choice;
+        if (choice === "skip") continue;
+      }
+      downloads.push({ remotePath: file.remotePath, localPath, conflictStrategy });
+    }
+    await runWithConcurrency(downloads, (download) => downloadOne(
+      sessionId,
+      download.remotePath,
+      download.localPath,
+      download.conflictStrategy,
+    ));
+    await finishPreparedDirectory(prepared, true);
+    return true;
+  } catch (error) {
+    await rollbackPreparedDirectory(prepared, undefined, error);
   }
 }
 
@@ -820,39 +1020,48 @@ async function startDownload() {
   }
   const localRoot = await open({ directory: true, multiple: false, title: "选择下载保存目录" });
   if (!localRoot || Array.isArray(localRoot)) return;
-  const conflict = await requestConflict("批量下载中的同名文件", true);
-  if (conflict.strategy === "cancel") return;
-  const batchConflictStrategy = conflict.strategy;
+  const conflicts = createConflictBatchContext();
   try {
-    const downloads: Array<{ remotePath: string; localPath: string }> = [];
-    let skippedDirectEntries = 0;
+    const directDownloads: Array<{
+      remotePath: string;
+      localPath: string;
+      conflictStrategy: ConflictStrategy;
+    }> = [];
+    const directoryCount = selected.filter((item) => item.kind === "directory").length;
     for (const item of selected) {
-      if (item.kind === "file") {
-        downloads.push({ remotePath: item.path, localPath: joinLocalPath(localRoot, item.name) });
+      if (item.kind === "directory") {
+        const completed = await downloadDirectoryItem(
+          sessionId,
+          state,
+          item,
+          localRoot,
+          conflicts,
+          directoryCount > 1,
+        );
+        if (!completed) return;
         continue;
       }
-      if (item.kind !== "directory") {
-        skippedDirectEntries += 1;
-        continue;
+      if (item.kind !== "file") continue;
+      const localPath = joinLocalPath(localRoot, item.name);
+      const inspection = await inspectLocalPath(localPath);
+      if (inspection.kind === "directory" || inspection.kind === "other") {
+        throw new Error(`本地目标“${item.name}”已存在同名目录、链接或不支持的条目`);
       }
-      const preparedRoot = await prepareLocalDirectory(joinLocalPath(localRoot, item.name), batchConflictStrategy);
-      if (preparedRoot.skipped) continue;
-      const manifest = await scanRemoteDirectory(sessionId, item.path);
-      updateRecursiveScanNotice(state, manifest);
-      for (const directory of manifest.directories) {
-        await prepareLocalDirectory(joinLocalPath(preparedRoot.path, directory), "overwrite");
+      let conflictStrategy: ConflictStrategy = "overwrite";
+      if (inspection.kind === "file") {
+        const choice = await chooseFileConflict(item.name, conflicts, selected.length > 1);
+        if (choice === "cancel") return;
+        conflictStrategy = choice;
+        if (choice === "skip") continue;
       }
-      for (const file of manifest.files) {
-        downloads.push({
-          remotePath: file.remotePath,
-          localPath: joinLocalPath(preparedRoot.path, file.relativePath),
-        });
-      }
+      directDownloads.push({ remotePath: item.path, localPath, conflictStrategy });
     }
-    if (skippedDirectEntries) {
-      state.notice = `${state.notice} 已跳过 ${skippedDirectEntries} 个直接选择的链接或不支持项。`.trim();
-    }
-    await runWithConcurrency(downloads, (item) => downloadOne(sessionId, item.remotePath, item.localPath, batchConflictStrategy));
+    await runWithConcurrency(directDownloads, (download) => downloadOne(
+      sessionId,
+      download.remotePath,
+      download.localPath,
+      download.conflictStrategy,
+    ));
   } catch (error) {
     state.error = describeCommandError(error);
   }
@@ -1172,12 +1381,13 @@ async function handleDroppedPaths(paths: string[]) {
   if (!session?.connected || !paths.length) return;
   const sessionId = session.id;
   const state = ensureSftpSessionState(sftpStates, sessionId);
+  const conflicts = createConflictBatchContext();
   selectedTool.value = "files";
   const files: string[] = [];
   for (const path of paths) {
     try {
       const manifest = await scanLocalDirectory(path, sessionId);
-      await uploadDirectoryPath(path, manifest, sessionId);
+      await uploadDirectoryPath(path, manifest, sessionId, conflicts, paths.length > 1);
     } catch (error) {
       if (commandErrorCode(error) === "LOCAL_DIRECTORY_INVALID") {
         files.push(path);
@@ -1187,7 +1397,7 @@ async function handleDroppedPaths(paths: string[]) {
       return;
     }
   }
-  if (files.length) await uploadFilePaths(files, sessionId);
+  if (files.length) await uploadFilePaths(files, sessionId, conflicts);
 }
 
 function formatUptime(seconds = 0) {
@@ -1442,7 +1652,20 @@ onBeforeUnmount(() => {
     </div>
     <ConnectionManager :open="showConnectionManager" @close="showConnectionManager = false" @changed="profiles = $event.profiles" @connect="connectManagedProfiles" />
     <div v-if="conflictRequest" class="dialog-backdrop conflict-backdrop">
-      <section class="conflict-dialog" role="dialog" aria-modal="true" aria-label="同名文件处理"><header><strong>目标中已存在同名项目</strong></header><p>“{{ conflictRequest.name }}”已存在，请选择处理方式。</p><label v-if="conflictRequest.allowAll"><input v-model="conflictApplyAll" type="checkbox" />应用到本批次全部冲突</label><footer><button @click="resolveConflict('cancel')">取消</button><button @click="resolveConflict('skip')">跳过</button><button @click="resolveConflict('rename')">自动重命名</button><button class="primary-button" @click="resolveConflict('overwrite')">安全覆盖</button></footer></section>
+      <section class="conflict-dialog" role="dialog" aria-modal="true" :aria-label="conflictRequest.kind === 'directory' ? '同名目录处理' : '同名文件处理'">
+        <header><strong>{{ conflictRequest.kind === 'directory' ? '目标中已存在同名目录' : '目标中已存在同名文件' }}</strong></header>
+        <p>“{{ conflictRequest.name }}”已存在，请选择处理方式。</p>
+        <p v-if="conflictRequest.kind === 'directory'" class="conflict-explanation">合并会保留目标中的额外内容；替换会先备份原目录，并删除目标中源目录不存在的额外内容。</p>
+        <label v-if="conflictRequest.allowAll"><input v-model="conflictApplyAll" type="checkbox" />应用到本批次全部{{ conflictRequest.kind === 'directory' ? '目录' : '文件' }}冲突</label>
+        <footer>
+          <button @click="resolveConflict('cancel')">取消</button>
+          <button @click="resolveConflict('skip')">跳过</button>
+          <button @click="resolveConflict('rename')">自动重命名</button>
+          <button v-if="conflictRequest.kind === 'directory'" class="danger-button" @click="resolveConflict('replace')">替换目录</button>
+          <button v-if="conflictRequest.kind === 'directory'" class="primary-button" @click="resolveConflict('merge')">合并目录</button>
+          <button v-else class="primary-button" @click="resolveConflict('overwrite')">安全覆盖</button>
+        </footer>
+      </section>
     </div>
   </div>
 </template>
