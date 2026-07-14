@@ -1,7 +1,7 @@
 # LiteShell SFTP 修改计划
 
 更新时间：2026-07-14  
-状态：实施进行中，PR1～PR2 已完成，PR3 已实现并待 CI/合并验证
+状态：实施进行中，PR1～PR3 已完成，PR4 已实现并待 CI/合并验证
 执行原则：先修复数据安全和一致性问题，再完善传输可靠性，最后扩展交互功能。
 
 ## 1. 文档定位
@@ -102,8 +102,8 @@ npm run desktop
 | --- | --- | --- | --- | --- |
 | PR1 | SFTP 会话状态隔离 | `fix/sftp-session-state-isolation` | 已完成 | 无 |
 | PR2 | 相同目标路径传输互斥 | `fix/sftp-transfer-target-lock` | 已完成 | PR1 |
-| PR3 | 文件与目录冲突保护 | `fix/sftp-entry-type-conflicts` | 待验证 | PR2 |
-| PR4 | 统一传输终态和清理 | `fix/sftp-transfer-finalization` | 待开始 | PR3 |
+| PR3 | 文件与目录冲突保护 | `fix/sftp-entry-type-conflicts` | 已完成 | PR2 |
+| PR4 | 统一传输终态和清理 | `fix/sftp-transfer-finalization` | 待验证 | PR3 |
 | PR5 | 安全断点续传和任务检查点 | `feat/sftp-safe-resume-checkpoint` | 待开始 | PR4 |
 | PR6 | 递归传输和符号链接安全 | `fix/sftp-recursive-transfer-safety` | 待开始 | PR5 |
 | PR7 | 明确目录冲突语义 | `feat/sftp-directory-conflict-strategies` | 待开始 | PR6 |
@@ -358,7 +358,7 @@ LOCAL_TARGET_IS_FILE
 
 ## 8. PR4：统一传输终态和清理
 
-状态：`待开始`
+状态：`待验证`
 
 ### 目标
 
@@ -432,7 +432,19 @@ paused
 
 ### 完成记录
 
-尚未开始。
+实现内容：
+
+- 新增统一失败终结器，复制、取消、shutdown、备份和提交错误均发出唯一 `failed`/`cancelled` 终态。
+- 新增统一成功终结器，完成事件、取消标记清理和 SFTP 关闭集中处理。
+- 上传/下载 post-copy 阶段不再使用会绕过终态的 `?`。
+- commit 失败仍优先恢复原目标，并通过统一终结器清理。
+- 新增错误到终态映射测试。
+
+验证：等待 GitHub Actions；未执行真实服务器写入测试。
+
+本地待测：弱网断开、磁盘满、权限不足和覆盖提交失败时，传输面板必须离开 running 且可重试。
+
+下一步：PR5：安全断点续传和任务检查点。
 
 ---
 

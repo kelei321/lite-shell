@@ -455,40 +455,63 @@ pub async fn sftp_upload(
     )
     .await;
     if let Err(error) = result {
-        let state = if error.code == "TRANSFER_CANCELLED" {
-            "cancelled"
-        } else {
-            "failed"
-        };
-        emit_transfer(
-            &app,
-            &transfer_id,
-            &session_id,
-            "upload",
-            &display_name(&local_path),
-            0,
-            total,
-            state,
-            Some(error.message.clone()),
-            0,
-            None,
-            resumed_from,
+        return Err(
+            finish_transfer_failure(
+                &app,
+                &transfer_id,
+                &session_id,
+                "upload",
+                &display_name(&local_path),
+                0,
+                total,
+                resumed_from,
+                &transfers,
+                &sftp,
+                error,
+            )
+            .await,
         );
-        transfers.cancelled.lock().await.remove(&transfer_id);
-        sftp.close().await.ok();
-        return Err(error);
     }
-    target
-        .shutdown()
-        .await
-        .map_err(|error| CommandError::new("SFTP_UPLOAD_CLOSE_FAILED", error.to_string()))?;
+    if let Err(error) = target.shutdown().await {
+        return Err(
+            finish_transfer_failure(
+                &app,
+                &transfer_id,
+                &session_id,
+                "upload",
+                &display_name(&local_path),
+                total,
+                total,
+                resumed_from,
+                &transfers,
+                &sftp,
+                CommandError::new("SFTP_UPLOAD_CLOSE_FAILED", error.to_string()),
+            )
+            .await,
+        );
+    }
     let backup_path = format!("{target_path}.liteshell-{transfer_id}.backup");
     let has_original = sftp.metadata(target_path.clone()).await.is_ok();
     if has_original {
         sftp.remove_file(backup_path.clone()).await.ok();
-        sftp.rename(target_path.clone(), backup_path.clone())
-            .await
-            .map_err(sftp_error("SFTP_UPLOAD_BACKUP_FAILED"))?;
+        if let Err(error) = sftp.rename(target_path.clone(), backup_path.clone()).await {
+            return Err(
+                finish_transfer_failure(
+                    &app,
+                    &transfer_id,
+                    &session_id,
+                    "upload",
+                    &display_name(&local_path),
+                    total,
+                    total,
+                    resumed_from,
+                    &transfers,
+                    &sftp,
+                    sftp_error("SFTP_UPLOAD_BACKUP_FAILED")(error),
+                )
+                .await,
+            );
+        }
     }
     if let Err(error) = sftp
         .rename(temporary_path.clone(), target_path.clone())
@@ -500,46 +523,38 @@ pub async fn sftp_upload(
                 .ok();
         }
         sftp.remove_file(temporary_path).await.ok();
-        transfers.cancelled.lock().await.remove(&transfer_id);
-        emit_transfer(
-            &app,
-            &transfer_id,
-            &session_id,
-            "upload",
-            &display_name(&local_path),
-            total,
-            total,
-            "failed",
-            Some(error.to_string()),
-            0,
-            None,
-            resumed_from,
+        return Err(
+            finish_transfer_failure(
+                &app,
+                &transfer_id,
+                &session_id,
+                "upload",
+                &display_name(&local_path),
+                total,
+                total,
+                resumed_from,
+                &transfers,
+                &sftp,
+                CommandError::new("SFTP_UPLOAD_COMMIT_FAILED", error.to_string()),
+            )
+            .await,
         );
-        sftp.close().await.ok();
-        return Err(CommandError::new(
-            "SFTP_UPLOAD_COMMIT_FAILED",
-            error.to_string(),
-        ));
     }
     if has_original {
         sftp.remove_file(backup_path).await.ok();
     }
-    emit_transfer(
+    finish_transfer_success(
         &app,
         &transfer_id,
         &session_id,
         "upload",
         &display_name(&local_path),
         total,
-        total,
-        "completed",
-        None,
-        0,
-        Some(0),
         resumed_from,
-    );
-    transfers.cancelled.lock().await.remove(&transfer_id);
-    sftp.close().await.ok();
+        &transfers,
+        &sftp,
+    )
+    .await;
     Ok(TransferResult {
         path: target_path,
         skipped: false,
@@ -662,86 +677,101 @@ pub async fn sftp_download(
     )
     .await;
     if let Err(error) = result {
-        let state = if error.code == "TRANSFER_CANCELLED" {
-            "cancelled"
-        } else {
-            "failed"
-        };
-        emit_transfer(
-            &app,
-            &transfer_id,
-            &session_id,
-            "download",
-            &display_name(&remote_path),
-            0,
-            total,
-            state,
-            Some(error.message.clone()),
-            0,
-            None,
-            resumed_from,
+        return Err(
+            finish_transfer_failure(
+                &app,
+                &transfer_id,
+                &session_id,
+                "download",
+                &display_name(&remote_path),
+                0,
+                total,
+                resumed_from,
+                &transfers,
+                &sftp,
+                error,
+            )
+            .await,
         );
-        transfers.cancelled.lock().await.remove(&transfer_id);
-        sftp.close().await.ok();
-        return Err(error);
     }
-    target
-        .shutdown()
-        .await
-        .map_err(|error| CommandError::new("LOCAL_FILE_WRITE_FAILED", error.to_string()))?;
+    if let Err(error) = target.shutdown().await {
+        return Err(
+            finish_transfer_failure(
+                &app,
+                &transfer_id,
+                &session_id,
+                "download",
+                &display_name(&remote_path),
+                total,
+                total,
+                resumed_from,
+                &transfers,
+                &sftp,
+                CommandError::new("LOCAL_FILE_WRITE_FAILED", error.to_string()),
+            )
+            .await,
+        );
+    }
     let backup_path = format!("{target_path}.liteshell-{transfer_id}.backup");
     let has_original = fs::metadata(&target_path).await.is_ok();
     if has_original {
         fs::remove_file(&backup_path).await.ok();
-        fs::rename(&target_path, &backup_path)
-            .await
-            .map_err(|error| CommandError::new("LOCAL_FILE_BACKUP_FAILED", error.to_string()))?;
+        if let Err(error) = fs::rename(&target_path, &backup_path).await {
+            return Err(
+                finish_transfer_failure(
+                    &app,
+                    &transfer_id,
+                    &session_id,
+                    "download",
+                    &display_name(&remote_path),
+                    total,
+                    total,
+                    resumed_from,
+                    &transfers,
+                    &sftp,
+                    CommandError::new("LOCAL_FILE_BACKUP_FAILED", error.to_string()),
+                )
+                .await,
+            );
+        }
     }
     if let Err(error) = fs::rename(&temporary_path, &target_path).await {
         if has_original {
             fs::rename(&backup_path, &target_path).await.ok();
         }
         fs::remove_file(&temporary_path).await.ok();
-        transfers.cancelled.lock().await.remove(&transfer_id);
-        emit_transfer(
-            &app,
-            &transfer_id,
-            &session_id,
-            "download",
-            &display_name(&remote_path),
-            total,
-            total,
-            "failed",
-            Some(error.to_string()),
-            0,
-            None,
-            resumed_from,
+        return Err(
+            finish_transfer_failure(
+                &app,
+                &transfer_id,
+                &session_id,
+                "download",
+                &display_name(&remote_path),
+                total,
+                total,
+                resumed_from,
+                &transfers,
+                &sftp,
+                CommandError::new("LOCAL_FILE_COMMIT_FAILED", error.to_string()),
+            )
+            .await,
         );
-        sftp.close().await.ok();
-        return Err(CommandError::new(
-            "LOCAL_FILE_COMMIT_FAILED",
-            error.to_string(),
-        ));
     }
     if has_original {
         fs::remove_file(backup_path).await.ok();
     }
-    emit_transfer(
+    finish_transfer_success(
         &app,
         &transfer_id,
         &session_id,
         "download",
         &display_name(&remote_path),
         total,
-        total,
-        "completed",
-        None,
-        0,
-        Some(0),
         resumed_from,
-    );
-    transfers.cancelled.lock().await.remove(&transfer_id);
-    sftp.close().await.ok();
+        &transfers,
+        &sftp,
+    )
+    .await;
     Ok(TransferResult {
         path: target_path,
         skipped: false,
@@ -955,6 +985,77 @@ where
         }
     }
     Ok(())
+}
+
+fn terminal_state_for_error(error: &CommandError) -> &'static str {
+    if error.code == "TRANSFER_CANCELLED" {
+        "cancelled"
+    } else {
+        "failed"
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_transfer_failure(
+    app: &AppHandle,
+    transfer_id: &str,
+    session_id: &str,
+    direction: &'static str,
+    file_name: &str,
+    transferred: u64,
+    total: u64,
+    resumed_from: u64,
+    transfers: &State<'_, SftpTransferManager>,
+    sftp: &SftpSession,
+    error: CommandError,
+) -> CommandError {
+    emit_transfer(
+        app,
+        transfer_id,
+        session_id,
+        direction,
+        file_name,
+        transferred,
+        total,
+        terminal_state_for_error(&error),
+        Some(error.message.clone()),
+        0,
+        None,
+        resumed_from,
+    );
+    transfers.cancelled.lock().await.remove(transfer_id);
+    sftp.close().await.ok();
+    error
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_transfer_success(
+    app: &AppHandle,
+    transfer_id: &str,
+    session_id: &str,
+    direction: &'static str,
+    file_name: &str,
+    total: u64,
+    resumed_from: u64,
+    transfers: &State<'_, SftpTransferManager>,
+    sftp: &SftpSession,
+) {
+    emit_transfer(
+        app,
+        transfer_id,
+        session_id,
+        direction,
+        file_name,
+        total,
+        total,
+        "completed",
+        None,
+        0,
+        Some(0),
+        resumed_from,
+    );
+    transfers.cancelled.lock().await.remove(transfer_id);
+    sftp.close().await.ok();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1288,6 +1389,14 @@ mod tests {
         assert_eq!(error.code, "LOCAL_TARGET_IS_FILE");
         assert!(fs::metadata(&target).await.unwrap().is_file());
         fs::remove_file(target).await.unwrap();
+    }
+
+    #[test]
+    fn maps_transfer_errors_to_one_terminal_state() {
+        let cancelled = CommandError::new("TRANSFER_CANCELLED", "cancelled");
+        let failed = CommandError::new("TRANSFER_WRITE_FAILED", "failed");
+        assert_eq!(terminal_state_for_error(&cancelled), "cancelled");
+        assert_eq!(terminal_state_for_error(&failed), "failed");
     }
 
     #[tokio::test]
