@@ -1,7 +1,7 @@
 # LiteShell SFTP 修改计划
 
 更新时间：2026-07-14  
-状态：实施进行中，PR1～PR3 已完成，PR4 已实现并待 CI/合并验证
+状态：实施进行中，PR1～PR4 已完成，PR5 已实现并待 CI/合并验证
 执行原则：先修复数据安全和一致性问题，再完善传输可靠性，最后扩展交互功能。
 
 ## 1. 文档定位
@@ -103,8 +103,8 @@ npm run desktop
 | PR1 | SFTP 会话状态隔离 | `fix/sftp-session-state-isolation` | 已完成 | 无 |
 | PR2 | 相同目标路径传输互斥 | `fix/sftp-transfer-target-lock` | 已完成 | PR1 |
 | PR3 | 文件与目录冲突保护 | `fix/sftp-entry-type-conflicts` | 已完成 | PR2 |
-| PR4 | 统一传输终态和清理 | `fix/sftp-transfer-finalization` | 待验证 | PR3 |
-| PR5 | 安全断点续传和任务检查点 | `feat/sftp-safe-resume-checkpoint` | 待开始 | PR4 |
+| PR4 | 统一传输终态和清理 | `fix/sftp-transfer-finalization` | 已完成 | PR3 |
+| PR5 | 安全断点续传和任务检查点 | `feat/sftp-safe-resume-checkpoint` | 待验证 | PR4 |
 | PR6 | 递归传输和符号链接安全 | `fix/sftp-recursive-transfer-safety` | 待开始 | PR5 |
 | PR7 | 明确目录冲突语义 | `feat/sftp-directory-conflict-strategies` | 待开始 | PR6 |
 | PR8 | 后端统一传输队列、暂停和恢复 | `feat/sftp-transfer-queue` | 待开始 | PR7 |
@@ -450,7 +450,7 @@ paused
 
 ## 9. PR5：安全断点续传和任务检查点
 
-状态：`待开始`
+状态：`待验证`
 
 ### 目标
 
@@ -527,7 +527,23 @@ updatedAt
 
 ### 完成记录
 
-尚未开始。
+实现内容：
+
+- 前端区分稳定 `taskId` 与每次尝试的 `transferId`，重试沿用 `taskId`。
+- Tauri 应用数据目录持久化版本化检查点，服务器标识由 Rust 根据 host、port、username 和已验证主机密钥派生，前端不能伪造。
+- 检查点在数据写入前创建，复制过程中定期更新，成功后删除，失败/取消后保留。
+- 续传校验源/目标、后端服务器身份、大小、纳秒级修改时间和首尾采样指纹；同大小内容变化、错误会话、检查点损坏及临时文件异常都会被拒绝。
+- 身份匹配后允许实际 `.part` 长度领先于最后一次检查点进度，并从实际安全长度继续。
+- commit 失败保留完整临时文件，便于再次提交。
+- 应用启动读取未完成检查点；重新连接同一服务器后可继续或重新开始。
+- 支持仅删除检查点并保留临时文件，或校验 taskId 绑定后删除临时文件。
+- 新增会话身份区分、稳定任务互斥、检查点身份、内容采样指纹和临时路径绑定测试。
+
+验证：等待 GitHub Actions；未执行真实服务器写入测试。
+
+本地待测：取消/断网后重试、修改源文件后拒绝续传、应用数据目录检查点生成与成功清理。
+
+下一步：PR6：递归传输和符号链接安全。
 
 ---
 

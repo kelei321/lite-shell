@@ -10,9 +10,10 @@ use profiles::{
     profile_save, profiles_batch, profiles_list,
 };
 use sftp::{
-    sftp_cancel_transfer, sftp_create_directory, sftp_delete, sftp_delete_recursive, sftp_download,
-    sftp_list, sftp_local_directory_manifest, sftp_prepare_local_directory, sftp_rename,
-    sftp_upload, SftpTransferManager,
+    sftp_cancel_transfer, sftp_create_directory, sftp_delete, sftp_delete_recursive,
+    sftp_delete_transfer_checkpoint, sftp_discard_transfer_checkpoint, sftp_download, sftp_list,
+    sftp_list_transfer_checkpoints, sftp_local_directory_manifest, sftp_prepare_local_directory,
+    sftp_rename, sftp_upload, SftpTransferManager,
 };
 use ssh::{ssh_connect, ssh_connect_profile, ssh_disconnect, ssh_resize, ssh_send, SessionManager};
 
@@ -44,6 +45,9 @@ pub fn run() {
             sftp_upload,
             sftp_download,
             sftp_cancel_transfer,
+            sftp_list_transfer_checkpoints,
+            sftp_delete_transfer_checkpoint,
+            sftp_discard_transfer_checkpoint,
             sftp_local_directory_manifest,
             sftp_prepare_local_directory,
             sftp_create_directory,
