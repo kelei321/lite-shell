@@ -1,1 +1,31 @@
-error: corrupt patch at /tmp/agent.patch:366
+   350	+const sftpHistoryIndex = computed({
+   351	+  get: () => activeSftpState.value.historyIndex,
+   352	+  set: (value: number) => { activeSftpState.value.historyIndex = value; },
+   353	+});
+   354	+const sftpBookmarks = computed({
+   355	+  get: () => activeSftpState.value.bookmarks,
+   356	+  set: (value: string[]) => { activeSftpState.value.bookmarks = value; },
+   357	+});
+   358	+const sftpRecentPaths = computed({
+   359	+  get: () => activeSftpState.value.recentPaths,
+   360	+  set: (value: string[]) => { activeSftpState.value.recentPaths = value; },
+   361	+});
+   362	+});
+   363	 const sftpSearch = ref("");
+   364	 const sftpSortKey = ref<"name" | "size" | "modifiedAt">("name");
+   365	 const sftpSortAscending = ref(true);
+   366	@@ -184,46 +228,62 @@ function resolveConflict(strategy: ConflictStrategy | "cancel") {
+   367	   conflictRequest.value = null;
+   368	 }
+   369	 
+   370	-function sftpStorageScope() {
+   371	-  const session = activeSession.value;
+   372	-  return session?.profileId ?? session?.name ?? "default";
+   373	+function sftpStorageScope(sessionId: string) {
+   374	+  const session = sessions.value.find((item) => item.id === sessionId);
+   375	+  return session?.profileId ?? session?.name ?? sessionId ?? "default";
+   376	 }
+   377	 
+   378	-function readSftpStorage(key: string) {
+   379	+function readSftpStorage(sessionId: string, key: string) {
+   380	   try {
