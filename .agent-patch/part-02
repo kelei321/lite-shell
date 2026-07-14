@@ -118,4 +118,3 @@ index eefd4cd..e95626b 100644
 +const sftpRecentPaths = computed({
 +  get: () => activeSftpState.value.recentPaths,
 +  set: (value: string[]) => { activeSftpState.value.recentPaths = value; },
-+});
