@@ -1,0 +1,120 @@
+-    sftpError.value = "请先建立 SSH 连接";
++    state.entries = [];
++    state.error = "请先建立 SSH 连接";
++    state.loading = false;
+     return;
+   }
+-  sftpLoading.value = true;
+-  sftpError.value = "";
+-  selectedRemoteFiles.value = [];
++
++  const requestVersion = beginSftpDirectoryRequest(state);
+   try {
+-    const listing = await listSftpDirectory(session.id, path);
+-    sftpPath.value = listing.path;
+-    sftpEntries.value = listing.entries;
+-    if (recordHistory && sftpHistory.value[sftpHistoryIndex.value] !== listing.path) {
+-      sftpHistory.value = sftpHistory.value.slice(0, sftpHistoryIndex.value + 1);
+-      sftpHistory.value.push(listing.path);
+-      sftpHistoryIndex.value = sftpHistory.value.length - 1;
+-      sftpRecentPaths.value = [listing.path, ...sftpRecentPaths.value.filter((item) => item !== listing.path)].slice(0, 50);
+-      writeSftpStorage("liteshell.sftp.history.v1", sftpRecentPaths.value);
++    const listing = await listSftpDirectory(sessionId, path);
++    if (!isCurrentSftpDirectoryRequest(sftpStates, state, requestVersion)) return;
++    state.path = listing.path;
++    state.entries = bindSftpEntries(sessionId, listing.entries);
++    if (recordHistory && state.history[state.historyIndex] !== listing.path) {
++      state.history = state.history.slice(0, state.historyIndex + 1);
++      state.history.push(listing.path);
++      state.historyIndex = state.history.length - 1;
++      state.recentPaths = [listing.path, ...state.recentPaths.filter((item) => item !== listing.path)].slice(0, 50);
++      writeSftpStorage(sessionId, "liteshell.sftp.history.v1", state.recentPaths);
+     }
+   } catch (error) {
+-    sftpError.value = describeCommandError(error);
++    if (isCurrentSftpDirectoryRequest(sftpStates, state, requestVersion)) {
++      state.error = describeCommandError(error);
++    }
+   } finally {
+-    sftpLoading.value = false;
++    finishSftpDirectoryRequest(sftpStates, state, requestVersion);
+   }
+ }
+ 
++function loadActiveDirectory(path: string, recordHistory = true) {
++  const sessionId = activeSessionId.value;
++  if (sessionId) void loadDirectory(sessionId, path, recordHistory);
++}
++
+ function navigateHistory(offset: number) {
+-  const next = sftpHistoryIndex.value + offset;
+-  if (next < 0 || next >= sftpHistory.value.length) return;
+-  sftpHistoryIndex.value = next;
+-  void loadDirectory(sftpHistory.value[next], false);
++  const sessionId = activeSessionId.value;
++  if (!sessionId) return;
++  const state = ensureSftpSessionState(sftpStates, sessionId);
++  const next = state.historyIndex + offset;
++  if (next < 0 || next >= state.history.length) return;
++  state.historyIndex = next;
++  void loadDirectory(sessionId, state.history[next], false);
+ }
+ 
+ function parentPath(path: string) {
+@@ -516,18 +590,22 @@ function parentPath(path: string) {
+   return normalized.slice(0, normalized.lastIndexOf("/")) || "/";
+ }
+ 
+-function openSftpEntry(entry: SftpEntry) {
+-  selectedRemoteFiles.value = [entry];
+-  if (entry.kind === "directory") void loadDirectory(entry.path);
++function openSftpEntry(entry: SessionSftpEntry) {
++  const state = sftpStates.get(entry.sessionId);
++  if (!state || activeSessionId.value !== entry.sessionId) return;
++  state.selectedEntries = [entry];
++  if (entry.kind === "directory") void loadDirectory(entry.sessionId, entry.path);
+ }
+ 
+-function selectRemoteEntry(entry: SftpEntry, event: MouseEvent) {
++function selectRemoteEntry(entry: SessionSftpEntry, event: MouseEvent) {
++  const state = sftpStates.get(entry.sessionId);
++  if (!state || activeSessionId.value !== entry.sessionId) return;
+   if (event.ctrlKey || event.metaKey) {
+-    selectedRemoteFiles.value = selectedRemoteFiles.value.some((item) => item.path === entry.path)
+-      ? selectedRemoteFiles.value.filter((item) => item.path !== entry.path)
+-      : [...selectedRemoteFiles.value, entry];
++    state.selectedEntries = state.selectedEntries.some((item) => item.path === entry.path)
++      ? state.selectedEntries.filter((item) => item.path !== entry.path)
++      : [...state.selectedEntries, entry];
+   } else {
+-    selectedRemoteFiles.value = [entry];
++    state.selectedEntries = [entry];
+   }
+ }
+ 
+@@ -561,22 +639,25 @@ async function runWithConcurrency<T>(items: T[], worker: (item: T) => Promise<vo
+ async function startUpload() {
+   const session = activeSession.value;
+   if (!session?.connected) return;
++  const sessionId = session.id;
+   const selected = await open({ multiple: true, directory: false, title: "选择要上传的文件" });
+   if (!selected) return;
+   const paths = Array.isArray(selected) ? selected : [selected];
+-  await uploadFilePaths(paths);
++  await uploadFilePaths(paths, sessionId);
+ }
+ 
+-async function uploadFilePaths(paths: string[]) {
+-  const session = activeSession.value;
++async function uploadFilePaths(paths: string[], sessionId = activeSessionId.value) {
++  const session = sessions.value.find((item) => item.id === sessionId);
+   if (!session?.connected) return;
++  const state = ensureSftpSessionState(sftpStates, sessionId);
++  const targetDirectory = state.path;
+   const tasks: Array<{ localPath: string; remotePath: string; conflictStrategy: ConflictStrategy }> = [];
+   let batchStrategy: ConflictStrategy | null = null;
+   for (const localPath of paths) {
+     const fileName = localPath.split(/[\\/]/).pop();
+     if (!fileName) continue;
+-    const remotePath = joinRemotePath(sftpPath.value, fileName);
+-    const exists = sftpEntries.value.some((entry) => entry.name === fileName);
