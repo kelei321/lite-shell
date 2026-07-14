@@ -27,17 +27,40 @@ jobs:
           fetch-depth: 0
 
       - name: Apply focused safety patch
-        run: python scripts/apply_pr7_safety_fix.py
+        id: apply
+        shell: pwsh
+        run: |
+          python scripts/apply_pr7_safety_fix.py *> pr7-fix.log
+          $code = $LASTEXITCODE
+          Get-Content pr7-fix.log | Select-Object -Last 30
+          "exit_code=$code" >> $env:GITHUB_OUTPUT
+          exit 0
+
+      - name: Upload patch diagnostic
+        if: steps.apply.outputs.exit_code != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr7-fix-diagnostic
+          path: pr7-fix.log
+          retention-days: 1
+
+      - name: Stop after patch failure
+        if: steps.apply.outputs.exit_code != '0'
+        shell: pwsh
+        run: exit 1
 
       - name: Set up Rust formatter
+        if: steps.apply.outputs.exit_code == '0'
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt
           rustup default stable
 
       - name: Format Rust sources
+        if: steps.apply.outputs.exit_code == '0'
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
 
       - name: Commit patched sources
+        if: steps.apply.outputs.exit_code == '0'
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
