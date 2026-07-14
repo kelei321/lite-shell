@@ -521,6 +521,7 @@ function handleSshEvent(event: SshEvent) {
     session.connected = event.kind === "connected" || (session.connected && event.kind === "data");
     if (event.kind === "disconnected" || event.kind === "exit" || event.kind === "error") session.connected = false;
   }
+  if (["connected", "disconnected", "exit", "error"].includes(event.kind)) void refreshTransferCheckpoints();
   if (event.kind === "connected" && event.sessionId === activeSessionId.value) void refreshMetrics();
 
   if (event.kind === "data" && event.dataBase64) {

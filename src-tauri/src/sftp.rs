@@ -1612,11 +1612,14 @@ pub async fn sftp_discard_transfer_checkpoint(
 }
 
 fn validate_checkpoint_temporary_path(checkpoint: &TransferCheckpoint) -> Result<(), CommandError> {
-    let suffix = format!(".liteshell-{}.part", checkpoint.task_id);
-    if !checkpoint.temporary_path.ends_with(&suffix) {
+    let expected = format!(
+        "{}.liteshell-{}.part",
+        checkpoint.target_path, checkpoint.task_id
+    );
+    if checkpoint.temporary_path != expected {
         return Err(CommandError::new(
             "TRANSFER_CHECKPOINT_INVALID",
-            "检查点临时路径无效",
+            "检查点临时路径与传输目标不匹配",
         ));
     }
     Ok(())
@@ -1894,7 +1897,8 @@ mod tests {
         let mut first = std::io::Cursor::new(vec![1_u8; 256 * 1024]);
         let mut second_data = vec![1_u8; 256 * 1024];
         second_data[0] = 2;
-        second_data[second_data.len() - 1] = 3;
+        let last_index = second_data.len() - 1;
+        second_data[last_index] = 3;
         let mut second = std::io::Cursor::new(second_data);
 
         let first_fingerprint = source_sample_fingerprint(&mut first, 256 * 1024)
@@ -1934,6 +1938,14 @@ mod tests {
         invalid.temporary_path = "C:\\tmp\\unrelated.part".to_owned();
         assert_eq!(
             validate_checkpoint_temporary_path(&invalid)
+                .unwrap_err()
+                .code,
+            "TRANSFER_CHECKPOINT_INVALID"
+        );
+        let mut wrong_target = checkpoint;
+        wrong_target.target_path = "C:\\tmp\\other.txt".to_owned();
+        assert_eq!(
+            validate_checkpoint_temporary_path(&wrong_target)
                 .unwrap_err()
                 .code,
             "TRANSFER_CHECKPOINT_INVALID"
