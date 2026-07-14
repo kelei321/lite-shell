@@ -1,6 +1,9 @@
 name: Apply PR7 task lock test fix
 
 on:
+  push:
+    branches:
+      - feat/sftp-safe-resume-checkpoint
   pull_request:
     branches:
       - main
@@ -12,6 +15,7 @@ permissions:
 
 jobs:
   apply:
+    if: github.actor != 'github-actions[bot]'
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -26,20 +30,9 @@ jobs:
           $content = Get-Content $path -Raw
           $content = $content.Replace("#[derive(Debug)]`r`nstruct TransferTaskGuard<'a> {", "struct TransferTaskGuard<'a> {")
           $content = $content.Replace("#[derive(Debug)]`nstruct TransferTaskGuard<'a> {", "struct TransferTaskGuard<'a> {")
-          $old = @'
-        assert_eq!(
-            manager.acquire_task("task-a").unwrap_err().code,
-            "TRANSFER_TASK_BUSY"
-        );
-'@
-          $new = @'
-        assert_eq!(
-            manager.acquire_task("task-a").err().map(|error| error.code),
-            Some("TRANSFER_TASK_BUSY")
-        );
-'@
-          if (-not $content.Contains($old.TrimStart("`r", "`n"))) { throw 'Task lock assertion not found' }
-          $content = $content.Replace($old.TrimStart("`r", "`n"), $new.TrimStart("`r", "`n"))
+          $content = $content.Replace('manager.acquire_task("task-a").unwrap_err().code', 'manager.acquire_task("task-a").err().map(|error| error.code)')
+          $content = $content.Replace('"TRANSFER_TASK_BUSY"`r`n        );', 'Some("TRANSFER_TASK_BUSY")`r`n        );')
+          $content = $content.Replace('"TRANSFER_TASK_BUSY"`n        );', 'Some("TRANSFER_TASK_BUSY")`n        );')
           Set-Content -Path $path -Value $content -NoNewline
           Remove-Item '.github/workflows/apply-pr7-test-assertion-fix.yml'
       - name: Set up Rust formatter
