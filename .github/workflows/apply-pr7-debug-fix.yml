@@ -1,0 +1,45 @@
+name: Apply PR7 test compile fix
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - reopened
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feat/sftp-safe-resume-checkpoint
+          fetch-depth: 0
+      - name: Derive Debug for task guard
+        shell: pwsh
+        run: |
+          $path = 'src-tauri/src/sftp.rs'
+          $content = Get-Content $path -Raw
+          $old = "struct TransferTaskGuard<'a> {"
+          $new = "#[derive(Debug)]`nstruct TransferTaskGuard<'a> {"
+          if (-not $content.Contains($old)) { throw 'TransferTaskGuard definition not found' }
+          Set-Content -Path $path -Value ($content.Replace($old, $new)) -NoNewline
+          Remove-Item '.github/workflows/apply-pr7-debug-fix.yml'
+      - name: Set up Rust formatter
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+      - name: Format Rust sources
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
+      - name: Commit fix
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: make transfer task guard debuggable"
+          git push origin HEAD:feat/sftp-safe-resume-checkpoint
