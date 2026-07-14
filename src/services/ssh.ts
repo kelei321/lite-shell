@@ -129,6 +129,22 @@ export type LocalDirectoryManifest = {
   files: Array<{ absolutePath: string; relativePath: string; size: number }>;
 };
 
+export type TransferCheckpoint = {
+  version: number;
+  taskId: string;
+  sessionId: string;
+  serverId: string;
+  direction: "upload" | "download";
+  sourcePath: string;
+  targetPath: string;
+  sourceSize: number;
+  sourceModifiedAt?: number;
+  temporaryPath: string;
+  transferred: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type TransferEvent = {
   transferId: string;
   sessionId: string;
@@ -234,6 +250,8 @@ export const uploadSftpFile = (request: {
   localPath: string;
   remotePath: string;
   transferId: string;
+  taskId: string;
+  serverId: string;
   conflictStrategy: ConflictStrategy;
   resume: boolean;
 }) => invoke<TransferResult>("sftp_upload", request);
@@ -243,12 +261,23 @@ export const downloadSftpFile = (request: {
   remotePath: string;
   localPath: string;
   transferId: string;
+  taskId: string;
+  serverId: string;
   conflictStrategy: ConflictStrategy;
   resume: boolean;
 }) => invoke<TransferResult>("sftp_download", request);
 
 export const cancelSftpTransfer = (transferId: string) =>
   invoke<void>("sftp_cancel_transfer", { transferId });
+
+export const listSftpTransferCheckpoints = () =>
+  invoke<TransferCheckpoint[]>("sftp_list_transfer_checkpoints");
+
+export const deleteSftpTransferCheckpoint = (taskId: string) =>
+  invoke<void>("sftp_delete_transfer_checkpoint", { taskId });
+
+export const discardSftpTransferCheckpoint = (taskId: string, sessionId?: string, serverId?: string) =>
+  invoke<void>("sftp_discard_transfer_checkpoint", { taskId, sessionId, serverId });
 
 export const getLocalDirectoryManifest = (path: string) =>
   invoke<LocalDirectoryManifest>("sftp_local_directory_manifest", { path });

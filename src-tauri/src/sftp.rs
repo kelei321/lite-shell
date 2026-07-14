@@ -11,7 +11,7 @@ use russh_sftp::{
     protocol::{FileType, StatusCode},
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     fs::{self, File, OpenOptions},
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
@@ -178,6 +178,56 @@ struct TransferEvent {
     speed_bytes_per_second: u64,
     eta_seconds: Option<u64>,
     resumed_from: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferCheckpoint {
+    version: u8,
+    task_id: String,
+    session_id: String,
+    server_id: String,
+    direction: String,
+    source_path: String,
+    target_path: String,
+    source_size: u64,
+    source_modified_at: Option<u64>,
+    temporary_path: String,
+    transferred: u64,
+    created_at: u64,
+    updated_at: u64,
+}
+
+impl TransferCheckpoint {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        task_id: &str,
+        session_id: &str,
+        server_id: &str,
+        direction: &str,
+        source_path: &str,
+        target_path: &str,
+        source_size: u64,
+        source_modified_at: Option<u64>,
+        temporary_path: &str,
+    ) -> Self {
+        let now = unix_now();
+        Self {
+            version: 1,
+            task_id: task_id.to_owned(),
+            session_id: session_id.to_owned(),
+            server_id: server_id.to_owned(),
+            direction: direction.to_owned(),
+            source_path: source_path.to_owned(),
+            target_path: target_path.to_owned(),
+            source_size,
+            source_modified_at,
+            temporary_path: temporary_path.to_owned(),
+            transferred: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 }
 
 #[tauri::command]
@@ -356,10 +406,13 @@ pub async fn sftp_upload(
     local_path: String,
     remote_path: String,
     transfer_id: String,
+    task_id: String,
+    server_id: String,
     conflict_strategy: ConflictStrategy,
     resume: bool,
 ) -> Result<TransferResult, CommandError> {
-    validate_transfer(&local_path, &remote_path, &transfer_id)?;
+    validate_transfer(&local_path, &remote_path, &transfer_id, &task_id)?;
+    validate_server_id(&server_id)?;
     let _permit = transfers
         .slots
         .acquire()
@@ -395,13 +448,14 @@ pub async fn sftp_upload(
     let mut source = File::open(&local_path)
         .await
         .map_err(|error| CommandError::new("LOCAL_FILE_OPEN_FAILED", error.to_string()))?;
-    let total = source
+    let source_metadata = source
         .metadata()
         .await
-        .map_err(|error| CommandError::new("LOCAL_FILE_READ_FAILED", error.to_string()))?
-        .len();
+        .map_err(|error| CommandError::new("LOCAL_FILE_READ_FAILED", error.to_string()))?;
+    let total = source_metadata.len();
+    let source_modified_at = modified_seconds(source_metadata.modified().ok());
     transfers.cancelled.lock().await.remove(&transfer_id);
-    let temporary_path = format!("{target_path}.liteshell.part");
+    let temporary_path = format!("{target_path}.liteshell-{task_id}.part");
     if let Ok(metadata) = sftp.metadata(temporary_path.clone()).await {
         ensure_file_target(
             metadata.is_dir(),
@@ -409,20 +463,32 @@ pub async fn sftp_upload(
             "传输临时路径已被同名目录占用",
         )?;
     }
+    let checkpoint_identity = TransferCheckpoint::new(
+        &task_id,
+        &session_id,
+        &server_id,
+        "upload",
+        &normalize_local_target(&local_path),
+        &normalize_remote_target(&target_path),
+        total,
+        source_modified_at,
+        &normalize_remote_target(&temporary_path),
+    );
     let resumed_from = if resume {
-        sftp.metadata(temporary_path.clone())
+        let saved = load_transfer_checkpoint(&app, &task_id).await?;
+        let temporary_size = sftp
+            .metadata(temporary_path.clone())
             .await
-            .map(|metadata| {
-                if metadata.len() <= total {
-                    metadata.len()
-                } else {
-                    0
-                }
-            })
-            .unwrap_or(0)
+            .map_err(|_| CommandError::new("TRANSFER_RESUME_PART_MISSING", "续传临时文件不存在"))?
+            .len();
+        validate_resume_checkpoint(&saved, &checkpoint_identity, temporary_size)?
     } else {
+        delete_transfer_checkpoint(&app, &task_id).await;
         0
     };
+    let mut checkpoint = checkpoint_identity;
+    checkpoint.transferred = resumed_from;
+    persist_transfer_checkpoint(&app, &checkpoint).await?;
     let mut target = if resumed_from > 0 {
         source
             .seek(SeekFrom::Start(resumed_from))
@@ -452,6 +518,7 @@ pub async fn sftp_upload(
         &mut source,
         &mut target,
         &transfers,
+        &mut checkpoint,
     )
     .await;
     if let Err(error) = result {
@@ -516,7 +583,6 @@ pub async fn sftp_upload(
                 .await
                 .ok();
         }
-        sftp.remove_file(temporary_path).await.ok();
         return Err(finish_transfer_failure(
             &app,
             &transfer_id,
@@ -545,6 +611,7 @@ pub async fn sftp_upload(
         resumed_from,
         &transfers,
         &sftp,
+        &task_id,
     )
     .await;
     Ok(TransferResult {
@@ -563,10 +630,13 @@ pub async fn sftp_download(
     remote_path: String,
     local_path: String,
     transfer_id: String,
+    task_id: String,
+    server_id: String,
     conflict_strategy: ConflictStrategy,
     resume: bool,
 ) -> Result<TransferResult, CommandError> {
-    validate_transfer(&local_path, &remote_path, &transfer_id)?;
+    validate_transfer(&local_path, &remote_path, &transfer_id, &task_id)?;
+    validate_server_id(&server_id)?;
     let _permit = transfers
         .slots
         .acquire()
@@ -609,12 +679,13 @@ pub async fn sftp_download(
         "远程源路径是目录，不能按文件下载",
     )?;
     let total = source_metadata.len();
+    let source_modified_at = modified_seconds(source_metadata.modified().ok());
     let mut source = sftp
         .open(remote_path.clone())
         .await
         .map_err(sftp_error("SFTP_DOWNLOAD_OPEN_FAILED"))?;
     transfers.cancelled.lock().await.remove(&transfer_id);
-    let temporary_path = format!("{target_path}.liteshell.part");
+    let temporary_path = format!("{target_path}.liteshell-{task_id}.part");
     if let Ok(metadata) = fs::metadata(&temporary_path).await {
         ensure_file_target(
             metadata.is_dir(),
@@ -622,20 +693,31 @@ pub async fn sftp_download(
             "传输临时路径已被同名目录占用",
         )?;
     }
+    let checkpoint_identity = TransferCheckpoint::new(
+        &task_id,
+        &session_id,
+        &server_id,
+        "download",
+        &normalize_remote_target(&remote_path),
+        &normalize_local_target(&target_path),
+        total,
+        source_modified_at,
+        &normalize_local_target(&temporary_path),
+    );
     let resumed_from = if resume {
-        fs::metadata(&temporary_path)
+        let saved = load_transfer_checkpoint(&app, &task_id).await?;
+        let temporary_size = fs::metadata(&temporary_path)
             .await
-            .map(|metadata| {
-                if metadata.len() <= total {
-                    metadata.len()
-                } else {
-                    0
-                }
-            })
-            .unwrap_or(0)
+            .map_err(|_| CommandError::new("TRANSFER_RESUME_PART_MISSING", "续传临时文件不存在"))?
+            .len();
+        validate_resume_checkpoint(&saved, &checkpoint_identity, temporary_size)?
     } else {
+        delete_transfer_checkpoint(&app, &task_id).await;
         0
     };
+    let mut checkpoint = checkpoint_identity;
+    checkpoint.transferred = resumed_from;
+    persist_transfer_checkpoint(&app, &checkpoint).await?;
     let mut target = if resumed_from > 0 {
         source
             .seek(SeekFrom::Start(resumed_from))
@@ -666,6 +748,7 @@ pub async fn sftp_download(
         &mut source,
         &mut target,
         &transfers,
+        &mut checkpoint,
     )
     .await;
     if let Err(error) = result {
@@ -725,7 +808,6 @@ pub async fn sftp_download(
         if has_original {
             fs::rename(&backup_path, &target_path).await.ok();
         }
-        fs::remove_file(&temporary_path).await.ok();
         return Err(finish_transfer_failure(
             &app,
             &transfer_id,
@@ -754,6 +836,7 @@ pub async fn sftp_download(
         resumed_from,
         &transfers,
         &sftp,
+        &task_id,
     )
     .await;
     Ok(TransferResult {
@@ -904,6 +987,7 @@ async fn transfer<R, W>(
     source: &mut R,
     target: &mut W,
     transfers: &State<'_, SftpTransferManager>,
+    checkpoint: &mut TransferCheckpoint,
 ) -> Result<(), CommandError>
 where
     R: AsyncRead + Unpin,
@@ -912,6 +996,8 @@ where
     let mut transferred = resumed_from;
     let started_at = Instant::now();
     let mut last_emit = Instant::now();
+    let mut last_checkpoint = Instant::now();
+    persist_transfer_checkpoint(app, checkpoint).await?;
     let mut buffer = vec![0_u8; 64 * 1024];
     emit_transfer(
         app,
@@ -943,6 +1029,11 @@ where
             .await
             .map_err(|error| CommandError::new("TRANSFER_WRITE_FAILED", error.to_string()))?;
         transferred += read as u64;
+        checkpoint.transferred = transferred;
+        if last_checkpoint.elapsed() >= Duration::from_secs(1) {
+            persist_transfer_checkpoint(app, checkpoint).await?;
+            last_checkpoint = Instant::now();
+        }
         let elapsed = started_at.elapsed().as_secs_f64();
         let speed = if elapsed > 0.0 {
             ((transferred - resumed_from) as f64 / elapsed) as u64
@@ -968,6 +1059,8 @@ where
             last_emit = Instant::now();
         }
     }
+    checkpoint.transferred = transferred;
+    persist_transfer_checkpoint(app, checkpoint).await?;
     Ok(())
 }
 
@@ -1023,7 +1116,9 @@ async fn finish_transfer_success(
     resumed_from: u64,
     transfers: &State<'_, SftpTransferManager>,
     sftp: &SftpSession,
+    task_id: &str,
 ) {
+    delete_transfer_checkpoint(app, task_id).await;
     emit_transfer(
         app,
         transfer_id,
@@ -1175,6 +1270,255 @@ fn normalize_local_target(path: &str) -> String {
     }
 }
 
+fn modified_seconds(value: Option<std::time::SystemTime>) -> Option<u64> {
+    value.and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn validate_server_id(server_id: &str) -> Result<(), CommandError> {
+    if server_id.trim().is_empty() || server_id.len() > 512 {
+        return Err(CommandError::new(
+            "INVALID_TRANSFER_SERVER",
+            "传输服务器标识无效",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_task_id(task_id: &str) -> Result<(), CommandError> {
+    if task_id.is_empty()
+        || !task_id
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
+    {
+        return Err(CommandError::new(
+            "INVALID_TRANSFER_TASK",
+            "传输任务标识无效",
+        ));
+    }
+    Ok(())
+}
+
+fn checkpoint_path(app: &AppHandle, task_id: &str) -> Result<PathBuf, CommandError> {
+    validate_task_id(task_id)?;
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| CommandError::new("TRANSFER_CHECKPOINT_PATH_FAILED", error.to_string()))?;
+    Ok(root.join("transfers").join(format!("{task_id}.json")))
+}
+
+async fn persist_transfer_checkpoint(
+    app: &AppHandle,
+    checkpoint: &TransferCheckpoint,
+) -> Result<(), CommandError> {
+    let path = checkpoint_path(app, &checkpoint.task_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|error| CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string()))?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    let mut persisted = checkpoint.clone();
+    persisted.updated_at = unix_now();
+    let content = serde_json::to_vec_pretty(&persisted)
+        .map_err(|error| CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string()))?;
+    fs::write(&temporary, content)
+        .await
+        .map_err(|error| CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string()))?;
+    if let Err(error) = fs::rename(&temporary, &path).await {
+        if fs::metadata(&path).await.is_ok() {
+            fs::remove_file(&path).await.map_err(|remove_error| {
+                CommandError::new(
+                    "TRANSFER_CHECKPOINT_WRITE_FAILED",
+                    remove_error.to_string(),
+                )
+            })?;
+            fs::rename(&temporary, &path).await.map_err(|rename_error| {
+                CommandError::new(
+                    "TRANSFER_CHECKPOINT_WRITE_FAILED",
+                    rename_error.to_string(),
+                )
+            })?;
+        } else {
+            return Err(CommandError::new(
+                "TRANSFER_CHECKPOINT_WRITE_FAILED",
+                error.to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn load_transfer_checkpoint(
+    app: &AppHandle,
+    task_id: &str,
+) -> Result<TransferCheckpoint, CommandError> {
+    let path = checkpoint_path(app, task_id)?;
+    let content = fs::read(path)
+        .await
+        .map_err(|_| CommandError::new("TRANSFER_RESUME_CHECKPOINT_MISSING", "续传检查点不存在"))?;
+    serde_json::from_slice(&content)
+        .map_err(|_| CommandError::new("TRANSFER_RESUME_CHECKPOINT_INVALID", "续传检查点已损坏"))
+}
+
+async fn delete_transfer_checkpoint(app: &AppHandle, task_id: &str) {
+    if let Ok(path) = checkpoint_path(app, task_id) {
+        fs::remove_file(path).await.ok();
+    }
+}
+
+fn validate_resume_checkpoint(
+    saved: &TransferCheckpoint,
+    expected: &TransferCheckpoint,
+    temporary_size: u64,
+) -> Result<u64, CommandError> {
+    let identity_matches = saved.version == expected.version
+        && saved.task_id == expected.task_id
+        && saved.server_id == expected.server_id
+        && saved.direction == expected.direction
+        && saved.source_path == expected.source_path
+        && saved.target_path == expected.target_path
+        && saved.source_size == expected.source_size
+        && saved.source_modified_at == expected.source_modified_at
+        && saved.temporary_path == expected.temporary_path;
+    if !identity_matches {
+        return Err(CommandError::new(
+            "TRANSFER_RESUME_SOURCE_CHANGED",
+            "源文件或传输目标已经变化，无法安全续传",
+        ));
+    }
+    if temporary_size > expected.source_size || saved.transferred > temporary_size {
+        return Err(CommandError::new(
+            "TRANSFER_RESUME_CHECKPOINT_INVALID",
+            "临时文件与续传检查点不一致",
+        ));
+    }
+    Ok(temporary_size)
+}
+
+#[tauri::command]
+pub async fn sftp_list_transfer_checkpoints(
+    app: AppHandle,
+) -> Result<Vec<TransferCheckpoint>, CommandError> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| CommandError::new("TRANSFER_CHECKPOINT_PATH_FAILED", error.to_string()))?
+        .join("transfers");
+    let mut directory = match fs::read_dir(&root).await {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(CommandError::new(
+                "TRANSFER_CHECKPOINT_READ_FAILED",
+                error.to_string(),
+            ))
+        }
+    };
+    let mut checkpoints = Vec::new();
+    while let Some(entry) = directory
+        .next_entry()
+        .await
+        .map_err(|error| CommandError::new("TRANSFER_CHECKPOINT_READ_FAILED", error.to_string()))?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = fs::read(&path).await else {
+            continue;
+        };
+        if let Ok(checkpoint) = serde_json::from_slice::<TransferCheckpoint>(&content) {
+            if validate_task_id(&checkpoint.task_id).is_ok() {
+                checkpoints.push(checkpoint);
+            }
+        }
+    }
+    checkpoints.sort_by_key(|checkpoint| std::cmp::Reverse(checkpoint.updated_at));
+    Ok(checkpoints)
+}
+
+#[tauri::command]
+pub async fn sftp_delete_transfer_checkpoint(
+    app: AppHandle,
+    task_id: String,
+) -> Result<(), CommandError> {
+    validate_task_id(&task_id)?;
+    delete_transfer_checkpoint(&app, &task_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_discard_transfer_checkpoint(
+    app: AppHandle,
+    manager: State<'_, SessionManager>,
+    task_id: String,
+    session_id: Option<String>,
+    server_id: Option<String>,
+) -> Result<(), CommandError> {
+    let checkpoint = load_transfer_checkpoint(&app, &task_id).await?;
+    validate_checkpoint_temporary_path(&checkpoint)?;
+    if checkpoint.direction == "upload" {
+        if server_id.as_deref() != Some(checkpoint.server_id.as_str()) {
+            return Err(CommandError::new(
+                "TRANSFER_DISCARD_SERVER_MISMATCH",
+                "当前连接与检查点所属服务器不匹配",
+            ));
+        }
+        let session_id = session_id.ok_or_else(|| {
+            CommandError::new(
+                "TRANSFER_DISCARD_SESSION_REQUIRED",
+                "删除远程临时文件前请重新连接对应服务器",
+            )
+        })?;
+        let sftp = open_sftp(&manager, &session_id).await?;
+        if let Err(error) = sftp.remove_file(checkpoint.temporary_path.clone()).await {
+            if !matches!(
+                &error,
+                SftpClientError::Status(status) if status.status_code == StatusCode::NoSuchFile
+            ) {
+                sftp.close().await.ok();
+                return Err(sftp_error("SFTP_TEMPORARY_DELETE_FAILED")(error));
+            }
+        }
+        sftp.close().await.ok();
+    } else {
+        match fs::remove_file(&checkpoint.temporary_path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CommandError::new(
+                    "LOCAL_TEMPORARY_DELETE_FAILED",
+                    error.to_string(),
+                ))
+            }
+        }
+    }
+    delete_transfer_checkpoint(&app, &task_id).await;
+    Ok(())
+}
+
+fn validate_checkpoint_temporary_path(
+    checkpoint: &TransferCheckpoint,
+) -> Result<(), CommandError> {
+    let suffix = format!(".liteshell-{}.part", checkpoint.task_id);
+    if !checkpoint.temporary_path.ends_with(&suffix) {
+        return Err(CommandError::new(
+            "TRANSFER_CHECKPOINT_INVALID",
+            "检查点临时路径无效",
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_file_target(
     is_directory: bool,
     code: &'static str,
@@ -1203,7 +1547,9 @@ fn validate_transfer(
     local_path: &str,
     remote_path: &str,
     transfer_id: &str,
+    task_id: &str,
 ) -> Result<(), CommandError> {
+    validate_task_id(task_id)?;
     if local_path.trim().is_empty()
         || remote_path.trim().is_empty()
         || transfer_id.trim().is_empty()
@@ -1275,9 +1621,9 @@ mod tests {
 
     #[test]
     fn validates_transfer_paths() {
-        assert!(validate_transfer("C:\\a.txt", "/tmp/a.txt", "transfer-1").is_ok());
+        assert!(validate_transfer("C:\\a.txt", "/tmp/a.txt", "transfer-1", "task-1").is_ok());
         assert_eq!(
-            validate_transfer("", "/tmp/a.txt", "transfer-1")
+            validate_transfer("", "/tmp/a.txt", "transfer-1", "task-1")
                 .unwrap_err()
                 .code,
             "INVALID_TRANSFER"
@@ -1381,6 +1727,68 @@ mod tests {
         let failed = CommandError::new("TRANSFER_WRITE_FAILED", "failed");
         assert_eq!(terminal_state_for_error(&cancelled), "cancelled");
         assert_eq!(terminal_state_for_error(&failed), "failed");
+    }
+
+    #[test]
+    fn validates_safe_resume_identity() {
+        let expected = TransferCheckpoint::new(
+            "task-1",
+            "session-a",
+            "profile-a",
+            "upload",
+            "C:\\source.txt",
+            "/tmp/target.txt",
+            100,
+            Some(10),
+            "/tmp/target.txt.liteshell-task-1.part",
+        );
+        let mut saved = expected.clone();
+        saved.transferred = 50;
+        assert_eq!(validate_resume_checkpoint(&saved, &expected, 75).unwrap(), 75);
+
+        let mut changed = expected.clone();
+        changed.source_modified_at = Some(11);
+        assert_eq!(
+            validate_resume_checkpoint(&saved, &changed, 75)
+                .unwrap_err()
+                .code,
+            "TRANSFER_RESUME_SOURCE_CHANGED"
+        );
+        assert_eq!(
+            validate_resume_checkpoint(&saved, &expected, 101)
+                .unwrap_err()
+                .code,
+            "TRANSFER_RESUME_CHECKPOINT_INVALID"
+        );
+    }
+
+    #[test]
+    fn validates_transfer_task_ids() {
+        assert!(validate_task_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
+        assert_eq!(validate_task_id("../bad").unwrap_err().code, "INVALID_TRANSFER_TASK");
+    }
+
+
+    #[test]
+    fn validates_checkpoint_temporary_path_binding() {
+        let checkpoint = TransferCheckpoint::new(
+            "task-1",
+            "session-a",
+            "profile-a",
+            "download",
+            "/remote/file.txt",
+            "C:\\tmp\\file.txt",
+            10,
+            Some(1),
+            "C:\\tmp\\file.txt.liteshell-task-1.part",
+        );
+        assert!(validate_checkpoint_temporary_path(&checkpoint).is_ok());
+        let mut invalid = checkpoint;
+        invalid.temporary_path = "C:\\tmp\\unrelated.part".to_owned();
+        assert_eq!(
+            validate_checkpoint_temporary_path(&invalid).unwrap_err().code,
+            "TRANSFER_CHECKPOINT_INVALID"
+        );
     }
 
     #[tokio::test]
