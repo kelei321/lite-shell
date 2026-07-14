@@ -1,7 +1,8 @@
 use std::{
     collections::HashSet,
     io::SeekFrom,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
+    sync::Mutex as StdMutex,
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
@@ -14,20 +15,90 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::{
     fs::{self, File, OpenOptions},
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
-    sync::{Mutex, Semaphore},
+    sync::{Mutex as AsyncMutex, Semaphore},
 };
 
 use crate::ssh::{open_sftp, CommandError, SessionManager};
 
 pub struct SftpTransferManager {
-    cancelled: Mutex<HashSet<String>>,
+    cancelled: AsyncMutex<HashSet<String>>,
+    active_targets: StdMutex<HashSet<TransferTargetKey>>,
     slots: Semaphore,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TransferDirection {
+    Upload,
+    Download,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TransferTargetKey {
+    session_id: String,
+    direction: TransferDirection,
+    target_path: String,
+}
+
+impl TransferTargetKey {
+    fn upload(session_id: &str, target_path: &str) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            direction: TransferDirection::Upload,
+            target_path: normalize_remote_target(target_path),
+        }
+    }
+
+    fn download(session_id: &str, target_path: &str) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            direction: TransferDirection::Download,
+            target_path: normalize_local_target(target_path),
+        }
+    }
+}
+
+struct TransferTargetGuard<'a> {
+    manager: &'a SftpTransferManager,
+    key: Option<TransferTargetKey>,
+}
+
+impl Drop for TransferTargetGuard<'_> {
+    fn drop(&mut self) {
+        let Some(key) = self.key.take() else {
+            return;
+        };
+        if let Ok(mut targets) = self.manager.active_targets.lock() {
+            targets.remove(&key);
+        }
+    }
+}
+
+impl SftpTransferManager {
+    fn acquire_target(
+        &self,
+        key: TransferTargetKey,
+    ) -> Result<TransferTargetGuard<'_>, CommandError> {
+        let mut targets = self.active_targets.lock().map_err(|_| {
+            CommandError::new("TRANSFER_TARGET_LOCK_FAILED", "传输目标锁不可用，请稍后重试")
+        })?;
+        if !targets.insert(key.clone()) {
+            return Err(CommandError::new(
+                "TRANSFER_TARGET_BUSY",
+                "该目标文件已有传输任务正在运行",
+            ));
+        }
+        Ok(TransferTargetGuard {
+            manager: self,
+            key: Some(key),
+        })
+    }
 }
 
 impl Default for SftpTransferManager {
     fn default() -> Self {
         Self {
-            cancelled: Mutex::new(HashSet::new()),
+            cancelled: AsyncMutex::new(HashSet::new()),
+            active_targets: StdMutex::new(HashSet::new()),
             slots: Semaphore::new(3),
         }
     }
@@ -300,6 +371,8 @@ pub async fn sftp_upload(
     } else {
         remote_path
     };
+    let _target_guard =
+        transfers.acquire_target(TransferTargetKey::upload(&session_id, &target_path))?;
     let mut source = File::open(&local_path)
         .await
         .map_err(|error| CommandError::new("LOCAL_FILE_OPEN_FAILED", error.to_string()))?;
@@ -483,6 +556,8 @@ pub async fn sftp_download(
     } else {
         local_path
     };
+    let _target_guard =
+        transfers.acquire_target(TransferTargetKey::download(&session_id, &target_path))?;
     let total = sftp
         .metadata(remote_path.clone())
         .await
@@ -920,6 +995,55 @@ fn split_file_name(name: &str) -> (&str, &str) {
     }
 }
 
+fn normalize_remote_target(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut segments = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            value => segments.push(value),
+        }
+    }
+    let normalized = segments.join("/");
+    if absolute {
+        format!("/{normalized}")
+    } else if normalized.is_empty() {
+        ".".to_owned()
+    } else {
+        normalized
+    }
+}
+
+fn normalize_local_target(path: &str) -> String {
+    let original = PathBuf::from(path);
+    let absolute = if original.is_absolute() {
+        original
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(original)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            value => normalized.push(value.as_os_str()),
+        }
+    }
+    let value = normalized.to_string_lossy().replace('/', "\\");
+    if cfg!(windows) {
+        value.to_lowercase()
+    } else {
+        value
+    }
+}
+
 fn validate_transfer(
     local_path: &str,
     remote_path: &str,
@@ -1019,6 +1143,45 @@ mod tests {
         assert_eq!(split_file_name("archive.tar.gz"), ("archive.tar", "gz"));
         assert_eq!(split_file_name("README"), ("README", ""));
         assert_eq!(split_file_name(".env"), (".env", ""));
+    }
+
+    #[test]
+    fn locks_the_same_transfer_target_until_guard_drops() {
+        let manager = SftpTransferManager::default();
+        let key = TransferTargetKey::upload("session-a", "/srv/file.txt");
+        let first = manager.acquire_target(key.clone()).unwrap();
+        let second = manager.acquire_target(key.clone());
+        assert_eq!(
+            second.err().map(|error| error.code),
+            Some("TRANSFER_TARGET_BUSY")
+        );
+        drop(first);
+        assert!(manager.acquire_target(key).is_ok());
+    }
+
+    #[test]
+    fn allows_different_transfer_targets() {
+        let manager = SftpTransferManager::default();
+        let _first = manager
+            .acquire_target(TransferTargetKey::upload("session-a", "/srv/a.txt"))
+            .unwrap();
+        assert!(manager
+            .acquire_target(TransferTargetKey::upload("session-a", "/srv/b.txt"))
+            .is_ok());
+        assert!(manager
+            .acquire_target(TransferTargetKey::download("session-a", "C:\\tmp\\a.txt"))
+            .is_ok());
+    }
+
+    #[test]
+    fn normalizes_transfer_target_paths() {
+        assert_eq!(
+            normalize_remote_target("/srv/./a/../file.txt"),
+            "/srv/file.txt"
+        );
+        let first = normalize_local_target("tmp/../tmp/file.txt");
+        let second = normalize_local_target("tmp/file.txt");
+        assert_eq!(first, second);
     }
 
     #[tokio::test]
