@@ -192,6 +192,21 @@ pub struct DirectoryListing {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DirectoryTreeListing {
+    path: String,
+    directories: Vec<SftpDirectoryTreeEntry>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpDirectoryTreeEntry {
+    name: String,
+    path: String,
+    permissions: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SftpEntry {
     name: String,
     path: String,
@@ -331,6 +346,51 @@ pub async fn sftp_list(
         path: canonical_path,
         entries,
     })
+}
+
+#[tauri::command]
+pub async fn sftp_list_directories(
+    manager: State<'_, SessionManager>,
+    session_id: String,
+    path: String,
+) -> Result<DirectoryTreeListing, CommandError> {
+    let sftp = open_sftp(&manager, &session_id).await?;
+    let result = async {
+        let canonical_path = sftp
+            .canonicalize(if path.trim().is_empty() { "." } else { &path })
+            .await
+            .map_err(sftp_error("SFTP_TREE_PATH_FAILED"))?;
+        let directory = sftp
+            .read_dir(canonical_path.clone())
+            .await
+            .map_err(sftp_error("SFTP_TREE_LIST_FAILED"))?;
+        let mut directories = directory
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let file_type = entry.file_type();
+                if matches!(name.as_str(), "." | "..")
+                    || !file_type.is_dir()
+                    || file_type.is_symlink()
+                {
+                    return None;
+                }
+                let metadata = entry.metadata();
+                Some(SftpDirectoryTreeEntry {
+                    name,
+                    path: entry.path(),
+                    permissions: format!("d{}", metadata.permissions()),
+                })
+            })
+            .collect::<Vec<_>>();
+        directories.sort_by_key(|entry| entry.name.to_lowercase());
+        Ok(DirectoryTreeListing {
+            path: canonical_path,
+            directories,
+        })
+    }
+    .await;
+    sftp.close().await.ok();
+    result
 }
 
 #[tauri::command]
