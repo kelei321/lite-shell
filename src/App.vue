@@ -15,10 +15,7 @@ import {
   deleteSftpEntry,
   deleteSftpDirectoryRecursive,
   deleteProfile,
-  deleteSftpTransferCheckpoint,
-  discardSftpTransferCheckpoint,
   describeCommandError,
-  downloadSftpFile,
   fetchSystemMetrics,
   finishDirectoryReplacement,
   getLocalDirectoryManifest,
@@ -29,16 +26,15 @@ import {
   isTauri,
   listProfiles,
   listSftpDirectory,
-  listSftpTransferCheckpoints,
   prepareLocalDirectory,
   prepareRemoteDirectory,
-  listenSftpTransfers,
+  listenSftpQueueTasks,
   listenSshEvents,
   resizeSsh,
   renameSftpEntry,
   saveProfile,
   sendSshInput,
-  uploadSftpFile,
+  wakeSftpTransferQueue,
   type ConnectionProfile,
   type ConflictStrategy,
   type DirectoryConflictStrategy,
@@ -50,8 +46,7 @@ import {
   type SftpEntry,
   type SshEvent,
   type SystemMetrics,
-  type TransferCheckpoint,
-  type TransferEvent,
+  type TransferQueueTask,
 } from "./services/ssh";
 import {
   beginSftpDirectoryRequest,
@@ -65,6 +60,7 @@ import {
   type SessionSftpEntry,
   type SftpSessionState,
 } from "./sftp/session-state";
+import { useSftpTransferQueue } from "./sftp/transfer-queue";
 import {
   IconAdjustmentsHorizontal,
   IconArrowDown,
@@ -125,8 +121,20 @@ const selectedRemoteFiles = computed({
   get: () => activeSftpState.value.selectedEntries,
   set: (value: SessionSftpEntry[]) => { activeSftpState.value.selectedEntries = value; },
 });
-const transfers = ref<TransferEvent[]>([]);
-const pendingTransferCheckpoints = ref<TransferCheckpoint[]>([]);
+const {
+  transferConcurrency,
+  visibleTransfers,
+  handleTransfer: handleQueueTransfer,
+  refreshTransferQueue,
+  enqueueTransfer,
+  waitForTransferTasks,
+  pauseTransfer: pauseQueuedTransfer,
+  resumeTransfer: resumeQueuedTransfer,
+  retryTransfer: retryQueuedTransfer,
+  cancelTransfer: cancelQueuedTransfer,
+  clearFinishedTransfers: clearCompletedTransfers,
+  changeTransferConcurrency,
+} = useSftpTransferQueue();
 const recursiveScan = ref<{ id: string; sessionId: string; label: string } | null>(null);
 const sftpHistory = computed({
   get: () => activeSftpState.value.history,
@@ -202,25 +210,17 @@ let unlistenDragDrop: (() => void) | null = null;
 let monitorTimer: number | null = null;
 const terminalBuffers = new Map<string, string>();
 const textDecoder = new TextDecoder();
-type TransferTask =
-  | { taskId: string; direction: "upload"; sessionId: string; localPath: string; remotePath: string; conflictStrategy: ConflictStrategy; resume: boolean }
-  | { taskId: string; direction: "download"; sessionId: string; remotePath: string; localPath: string; conflictStrategy: ConflictStrategy; resume: boolean };
-const transferTasks = new Map<string, TransferTask>();
-
 const visibleProfiles = computed(() => {
   const term = search.value.trim().toLowerCase();
   return profiles.value.filter((profile) =>
     !term || [profile.name, profile.host, profile.username, profile.group].some((value) => value.toLowerCase().includes(term)),
   );
 });
-const visibleTransfers = computed(() => transfers.value.filter((item) => item.sessionId === activeSessionId.value));
 const cpuPercent = computed(() => systemMetrics.value?.cpuUsagePercent ?? 0);
 const memoryPercent = computed(() => percentage(systemMetrics.value?.memoryUsed, systemMetrics.value?.memoryTotal));
 const swapPercent = computed(() => percentage(systemMetrics.value?.swapUsed, systemMetrics.value?.swapTotal));
 const networkScale = computed(() => Math.max(1024, ...networkRxHistory.value, ...networkTxHistory.value));
 const activeSession = computed(() => sessions.value.find((session) => session.id === activeSessionId.value));
-const checkpointSession = (checkpoint: TransferCheckpoint) =>
-  sessions.value.find((session) => session.connected && session.id === checkpoint.availableSessionId);
 const selectedRemoteFile = computed(() => selectedRemoteFiles.value.length === 1 ? selectedRemoteFiles.value[0] : null);
 const starred = computed(() => sftpBookmarks.value.includes(sftpPath.value));
 const displayedSftpEntries = computed(() => {
@@ -616,7 +616,10 @@ function handleSshEvent(event: SshEvent) {
     session.connected = event.kind === "connected" || (session.connected && event.kind === "data");
     if (event.kind === "disconnected" || event.kind === "exit" || event.kind === "error") session.connected = false;
   }
-  if (["connected", "disconnected", "exit", "error"].includes(event.kind)) void refreshTransferCheckpoints();
+  if (["connected", "disconnected", "exit", "error"].includes(event.kind)) {
+    void wakeSftpTransferQueue().catch(() => undefined);
+    void refreshTransferQueue().catch(() => undefined);
+  }
   if (event.kind === "connected" && event.sessionId === activeSessionId.value) void refreshMetrics();
 
   if (event.kind === "data" && event.dataBase64) {
@@ -721,25 +724,6 @@ function joinLocalPath(directory: string, name: string) {
   return `${directory.replace(/[\\/]+$/, "")}\\${name.replaceAll("/", "\\")}`;
 }
 
-async function runWithConcurrency<T>(items: T[], worker: (item: T) => Promise<void>, limit = 3) {
-  const queue = [...items];
-  const errors: unknown[] = [];
-  const workers = Array.from({ length: Math.min(limit, queue.length) }, async () => {
-    while (queue.length) {
-      const item = queue.shift();
-      if (item !== undefined) {
-        try {
-          await worker(item);
-        } catch (error) {
-          errors.push(error);
-        }
-      }
-    }
-  });
-  await Promise.all(workers);
-  if (errors.length) throw errors[0];
-}
-
 async function runRecursiveScan<T>(
   sessionId: string,
   label: string,
@@ -778,6 +762,47 @@ async function cancelRecursiveScan() {
   });
 }
 
+type FileQueueRequest = {
+  direction: "upload" | "download";
+  localPath: string;
+  remotePath: string;
+  conflictStrategy: ConflictStrategy;
+  allowPause: boolean;
+};
+
+function transferServerLabel(sessionId: string) {
+  return sessions.value.find((session) => session.id === sessionId)?.name ?? "未命名服务器";
+}
+
+async function enqueueAndWaitFileTransfers(sessionId: string, requests: FileQueueRequest[]) {
+  const taskIds: string[] = [];
+  let enqueueError: unknown;
+  for (const request of requests) {
+    try {
+      const task = await enqueueTransfer({
+        sessionId,
+        serverLabel: transferServerLabel(sessionId),
+        ...request,
+      });
+      taskIds.push(task.taskId);
+    } catch (error) {
+      enqueueError = error;
+      break;
+    }
+  }
+
+  let transferError: unknown;
+  if (taskIds.length) {
+    try {
+      await waitForTransferTasks(taskIds);
+    } catch (error) {
+      transferError = error;
+    }
+  }
+  if (enqueueError) throw enqueueError;
+  if (transferError) throw transferError;
+}
+
 async function startUpload() {
   const session = activeSession.value;
   if (!session?.connected) return;
@@ -797,7 +822,7 @@ async function uploadFilePaths(
   if (!session?.connected) return;
   const state = ensureSftpSessionState(sftpStates, sessionId);
   const targetDirectory = state.path;
-  const tasks: Array<{ localPath: string; remotePath: string; conflictStrategy: ConflictStrategy }> = [];
+  const requests: FileQueueRequest[] = [];
   for (const localPath of paths) {
     const fileName = localPath.split(/[\\/]/).pop();
     if (!fileName) continue;
@@ -814,17 +839,16 @@ async function uploadFilePaths(
       conflictStrategy = choice;
       if (conflictStrategy === "skip") continue;
     }
-    tasks.push({ localPath, remotePath, conflictStrategy });
+    requests.push({
+      direction: "upload",
+      localPath,
+      remotePath,
+      conflictStrategy,
+      allowPause: true,
+    });
   }
   try {
-    await runWithConcurrency(tasks, async (task) => {
-      const transferId = crypto.randomUUID();
-      const taskId = crypto.randomUUID();
-      const request = { taskId, direction: "upload" as const, sessionId, ...task, resume: false };
-      transferTasks.set(transferId, request);
-      const result = await uploadSftpFile({ sessionId, transferId, taskId, ...task, resume: false });
-      if (result.skipped) transferTasks.delete(transferId);
-    });
+    await enqueueAndWaitFileTransfers(sessionId, requests);
     await loadDirectory(sessionId, state.path, false);
   } catch (error) {
     state.error = describeCommandError(error);
@@ -884,11 +908,7 @@ async function uploadDirectoryPath(
     for (const directory of manifest.directories) {
       await prepareRemoteDirectory(sessionId, joinRemotePath(prepared.path, directory), "merge");
     }
-    const tasks: Array<{
-      localPath: string;
-      remotePath: string;
-      conflictStrategy: ConflictStrategy;
-    }> = [];
+    const requests: FileQueueRequest[] = [];
     for (const file of manifest.files) {
       const remotePath = joinRemotePath(prepared.path, file.relativePath);
       const inspection = await inspectRemotePath(sessionId, remotePath);
@@ -906,16 +926,15 @@ async function uploadDirectoryPath(
         conflictStrategy = choice;
         if (choice === "skip") continue;
       }
-      tasks.push({ localPath: file.absolutePath, remotePath, conflictStrategy });
+      requests.push({
+        direction: "upload",
+        localPath: file.absolutePath,
+        remotePath,
+        conflictStrategy,
+        allowPause: false,
+      });
     }
-    await runWithConcurrency(tasks, async (task) => {
-      const transferId = crypto.randomUUID();
-      const taskId = crypto.randomUUID();
-      const request = { taskId, direction: "upload" as const, sessionId, ...task, resume: false };
-      transferTasks.set(transferId, request);
-      const result = await uploadSftpFile({ sessionId, transferId, taskId, ...task, resume: false });
-      if (result.skipped) transferTasks.delete(transferId);
-    });
+    await enqueueAndWaitFileTransfers(sessionId, requests);
     await finishPreparedDirectory(prepared, true, sessionId);
     prepared = undefined;
     await loadDirectory(sessionId, state.path, false);
@@ -942,7 +961,7 @@ async function downloadDirectoryItem(
 ) {
   const targetPath = joinLocalPath(localRoot, item.name);
   const inspection = await inspectLocalPath(targetPath);
-  if (inspection.kind === "file" || inspection.kind === "other") {
+  if (inspection.kind === "file" || inspection.kind === "symlink" || inspection.kind === "other") {
     throw new Error(`本地目标“${item.name}”已存在同名文件、链接或不支持的条目`);
   }
   let directoryStrategy: DirectoryConflictStrategy = "merge";
@@ -964,15 +983,11 @@ async function downloadDirectoryItem(
     for (const directory of manifest.directories) {
       await prepareLocalDirectory(joinLocalPath(prepared.path, directory), "merge");
     }
-    const downloads: Array<{
-      remotePath: string;
-      localPath: string;
-      conflictStrategy: ConflictStrategy;
-    }> = [];
+    const requests: FileQueueRequest[] = [];
     for (const file of manifest.files) {
       const localPath = joinLocalPath(prepared.path, file.relativePath);
       const inspection = await inspectLocalPath(localPath);
-      if (inspection.kind === "directory" || inspection.kind === "other") {
+      if (inspection.kind === "directory" || inspection.kind === "symlink" || inspection.kind === "other") {
         throw new Error(`本地目标“${file.relativePath}”已存在同名目录、链接或不支持的条目`);
       }
       let conflictStrategy: ConflictStrategy = "overwrite";
@@ -985,14 +1000,15 @@ async function downloadDirectoryItem(
         conflictStrategy = choice;
         if (choice === "skip") continue;
       }
-      downloads.push({ remotePath: file.remotePath, localPath, conflictStrategy });
+      requests.push({
+        direction: "download",
+        remotePath: file.remotePath,
+        localPath,
+        conflictStrategy,
+        allowPause: false,
+      });
     }
-    await runWithConcurrency(downloads, (download) => downloadOne(
-      sessionId,
-      download.remotePath,
-      download.localPath,
-      download.conflictStrategy,
-    ));
+    await enqueueAndWaitFileTransfers(sessionId, requests);
     await finishPreparedDirectory(prepared, true);
     return true;
   } catch (error) {
@@ -1028,11 +1044,7 @@ async function startDownload() {
   if (!localRoot || Array.isArray(localRoot)) return;
   const conflicts = createConflictBatchContext();
   try {
-    const directDownloads: Array<{
-      remotePath: string;
-      localPath: string;
-      conflictStrategy: ConflictStrategy;
-    }> = [];
+    const directRequests: FileQueueRequest[] = [];
     const directoryCount = selected.filter((item) => item.kind === "directory").length;
     for (const item of selected) {
       if (item.kind === "directory") {
@@ -1050,7 +1062,7 @@ async function startDownload() {
       if (item.kind !== "file") continue;
       const localPath = joinLocalPath(localRoot, item.name);
       const inspection = await inspectLocalPath(localPath);
-      if (inspection.kind === "directory" || inspection.kind === "other") {
+      if (inspection.kind === "directory" || inspection.kind === "symlink" || inspection.kind === "other") {
         throw new Error(`本地目标“${item.name}”已存在同名目录、链接或不支持的条目`);
       }
       let conflictStrategy: ConflictStrategy = "overwrite";
@@ -1060,150 +1072,125 @@ async function startDownload() {
         conflictStrategy = choice;
         if (choice === "skip") continue;
       }
-      directDownloads.push({ remotePath: item.path, localPath, conflictStrategy });
+      directRequests.push({
+        direction: "download",
+        remotePath: item.path,
+        localPath,
+        conflictStrategy,
+        allowPause: true,
+      });
     }
-    await runWithConcurrency(directDownloads, (download) => downloadOne(
-      sessionId,
-      download.remotePath,
-      download.localPath,
-      download.conflictStrategy,
-    ));
+    await enqueueAndWaitFileTransfers(sessionId, directRequests);
   } catch (error) {
     state.error = describeCommandError(error);
   }
 }
 
-async function downloadOne(sessionId: string, remotePath: string, localPath: string, conflictStrategy: ConflictStrategy) {
-  const transferId = crypto.randomUUID();
-  const taskId = crypto.randomUUID();
-  const session = sessions.value.find((item) => item.id === sessionId);
-  if (!session) return;
-  const request = { taskId, direction: "download" as const, sessionId, remotePath, localPath, conflictStrategy, resume: false };
-  transferTasks.set(transferId, request);
-  const result = await downloadSftpFile({ sessionId, remotePath, localPath, transferId, taskId, conflictStrategy, resume: false });
-  if (result.skipped) transferTasks.delete(transferId);
+async function downloadOne(
+  sessionId: string,
+  remotePath: string,
+  localPath: string,
+  conflictStrategy: ConflictStrategy,
+) {
+  await enqueueAndWaitFileTransfers(sessionId, [{
+    direction: "download",
+    remotePath,
+    localPath,
+    conflictStrategy,
+    allowPause: true,
+  }]);
 }
 
-function handleTransfer(event: TransferEvent) {
-  const index = transfers.value.findIndex((item) => item.transferId === event.transferId);
-  if (index >= 0) {
-    const previous = transfers.value[index];
-    if (event.state !== "running" && event.transferred < previous.transferred) {
-      event.transferred = previous.transferred;
-    }
-    transfers.value[index] = event;
-  }
-  else transfers.value.push(event);
-  if (event.state === "completed") transferTasks.delete(event.transferId);
-  if (event.state !== "running") void refreshTransferCheckpoints();
-  if (event.state === "failed") {
-    ensureSftpSessionState(sftpStates, event.sessionId).error = event.message ?? "文件传输失败";
+function handleTransfer(task: TransferQueueTask) {
+  handleQueueTransfer(task);
+  if (task.state === "failed" && task.sessionId) {
+    const state = sftpStates.get(task.sessionId);
+    if (state) state.error = task.message ?? "文件传输失败";
   }
 }
 
-async function refreshTransferCheckpoints() {
-  if (!isTauri()) return;
-  pendingTransferCheckpoints.value = await listSftpTransferCheckpoints().catch(() => []);
+function transferProgress(item: TransferQueueTask) {
+  return item.total > 0 ? Math.round((item.transferred / item.total) * 100) : 0;
 }
 
-function checkpointFileName(checkpoint: TransferCheckpoint) {
-  const path = checkpoint.direction === "upload" ? checkpoint.sourcePath : checkpoint.targetPath;
-  return path.split(/[\\/]/).pop() ?? path;
+function transferStatusText(item: TransferQueueTask) {
+  if (item.state === "queued") return item.availableSessionId ? "排队中" : "等待连接";
+  if (item.state === "running") return `${transferProgress(item)}%`;
+  if (item.state === "pausing") return "正在停止";
+  if (item.state === "paused") return "已暂停";
+  if (item.state === "completed") return "完成";
+  if (item.state === "failed") return "失败";
+  return "已取消";
 }
 
-async function runRecoveredTransfer(checkpoint: TransferCheckpoint, resume: boolean) {
-  const session = checkpointSession(checkpoint);
-  if (!session) {
-    window.alert("请先重新连接该传输所属的服务器");
-    return;
-  }
-  activeSessionId.value = session.id;
-  const transferId = crypto.randomUUID();
-  const common = {
-    taskId: checkpoint.taskId,
-    sessionId: session.id,
-    conflictStrategy: "overwrite" as ConflictStrategy,
-    resume,
-  };
+function reportTransferActionError(item: TransferQueueTask, error: unknown) {
+  const message = describeCommandError(error);
+  const sessionId = item.availableSessionId ?? item.sessionId;
+  const state = sessionId ? sftpStates.get(sessionId) : undefined;
+  if (state) state.error = message;
+  else window.alert(message);
+}
+
+async function pauseTransferTask(item: TransferQueueTask) {
   try {
-    if (checkpoint.direction === "upload") {
-      const task: TransferTask = {
-        ...common,
-        direction: "upload",
-        localPath: checkpoint.sourcePath,
-        remotePath: checkpoint.targetPath,
-      };
-      transferTasks.set(transferId, task);
-      await uploadSftpFile({ ...task, transferId });
-    } else {
-      const task: TransferTask = {
-        ...common,
-        direction: "download",
-        remotePath: checkpoint.sourcePath,
-        localPath: checkpoint.targetPath,
-      };
-      transferTasks.set(transferId, task);
-      await downloadSftpFile({ ...task, transferId });
-    }
+    await pauseQueuedTransfer(item);
   } catch (error) {
-    ensureSftpSessionState(sftpStates, session.id).error = describeCommandError(error);
-  } finally {
-    await refreshTransferCheckpoints();
+    reportTransferActionError(item, error);
   }
 }
 
-async function preserveCheckpointTemporaryFile(checkpoint: TransferCheckpoint) {
-  await deleteSftpTransferCheckpoint(checkpoint.taskId);
-  await refreshTransferCheckpoints();
+async function resumeTransferTask(item: TransferQueueTask) {
+  if (item.availableSessionId) activeSessionId.value = item.availableSessionId;
+  try {
+    await resumeQueuedTransfer(item);
+  } catch (error) {
+    reportTransferActionError(item, error);
+  }
 }
 
-async function discardCheckpointTemporaryFile(checkpoint: TransferCheckpoint) {
-  const session = checkpoint.direction === "upload" ? checkpointSession(checkpoint) : undefined;
-  if (checkpoint.direction === "upload" && !session) {
-    window.alert("删除远程临时文件前请先重新连接对应服务器");
-    return;
+async function retryTransferTask(item: TransferQueueTask) {
+  if (item.availableSessionId) activeSessionId.value = item.availableSessionId;
+  try {
+    await retryQueuedTransfer(item);
+  } catch (error) {
+    reportTransferActionError(item, error);
+  }
+}
+
+async function cancelTransferTask(item: TransferQueueTask, deletePartial: boolean) {
+  if (deletePartial) {
+    const confirmed = await ask(
+      `确定取消“${item.fileName}”并删除已经保存的断点和临时文件吗？`,
+      {
+        title: "删除传输断点",
+        kind: "warning",
+        okLabel: "取消并删除",
+        cancelLabel: "返回",
+      },
+    );
+    if (!confirmed) return;
   }
   try {
-    await discardSftpTransferCheckpoint(checkpoint.taskId, session?.id);
-    await refreshTransferCheckpoints();
+    await cancelQueuedTransfer(item, deletePartial);
+  } catch (error) {
+    reportTransferActionError(item, error);
+  }
+}
+
+async function clearFinishedTransfers() {
+  try {
+    await clearCompletedTransfers();
   } catch (error) {
     window.alert(describeCommandError(error));
   }
 }
 
-function transferProgress(item: TransferEvent) {
-  return item.total > 0 ? Math.round((item.transferred / item.total) * 100) : 0;
-}
-
-function clearFinishedTransfers() {
-  for (const item of transfers.value.filter((entry) => entry.state !== "running")) {
-    transferTasks.delete(item.transferId);
-  }
-  transfers.value = transfers.value.filter((item) => item.state === "running");
-}
-
-async function cancelTransfer(item: TransferEvent) {
-  if (item.state !== "running") return;
-  await cancelSftpTransfer(item.transferId).catch((error) => {
-    ensureSftpSessionState(sftpStates, item.sessionId).error = describeCommandError(error);
-  });
-}
-
-async function retryTransfer(item: TransferEvent) {
-  const task = transferTasks.get(item.transferId);
-  if (!task || item.state === "running") return;
-  const transferId = crypto.randomUUID();
-  transferTasks.set(transferId, task);
-  const state = ensureSftpSessionState(sftpStates, task.sessionId);
+async function updateTransferConcurrency(event: Event) {
+  const concurrency = Number((event.target as HTMLSelectElement).value);
   try {
-    if (task.direction === "upload") {
-      await uploadSftpFile({ ...task, transferId, resume: true });
-      await loadDirectory(task.sessionId, state.path, false);
-    } else {
-      await downloadSftpFile({ ...task, transferId, resume: true });
-    }
+    await changeTransferConcurrency(concurrency);
   } catch (error) {
-    state.error = describeCommandError(error);
+    window.alert(describeCommandError(error));
   }
 }
 
@@ -1455,7 +1442,7 @@ onMounted(async () => {
 
   if (isTauri()) {
     unlistenSsh = await listenSshEvents(handleSshEvent);
-    unlistenSftp = await listenSftpTransfers(handleTransfer);
+    unlistenSftp = await listenSftpQueueTasks(handleTransfer);
     unlistenDragDrop = await getCurrentWindow().onDragDropEvent((event) => {
       if (event.payload.type === "over") sftpDragActive.value = Boolean(activeSession.value?.connected);
       else if (event.payload.type === "drop") {
@@ -1464,7 +1451,7 @@ onMounted(async () => {
       } else sftpDragActive.value = false;
     });
     profiles.value = await listProfiles().catch(() => []);
-    await refreshTransferCheckpoints();
+    await refreshTransferQueue();
   }
 });
 
@@ -1595,22 +1582,30 @@ onBeforeUnmount(() => {
             <button class="toolbar-button danger" :disabled="selectedRemoteFiles.length !== 1" @click="deleteRemoteEntry"><IconTrash :size="16" />删除</button>
           </div>
           <div v-if="recursiveScan && recursiveScan.sessionId === activeSessionId" class="sftp-scan-status"><span>{{ recursiveScan.label }}…</span><button @click="cancelRecursiveScan">取消扫描</button></div>
-          <div v-if="pendingTransferCheckpoints.length" class="transfer-queue checkpoint-queue">
-            <div class="transfer-queue-heading"><span>未完成传输（{{ pendingTransferCheckpoints.length }}）</span></div>
-            <div v-for="checkpoint in pendingTransferCheckpoints" :key="checkpoint.taskId" class="upload-strip failed">
-              <span>{{ checkpoint.direction === 'upload' ? '上传' : '下载' }} {{ checkpointFileName(checkpoint) }}<small>已保存 {{ formatSize(checkpoint.transferred, 'file') }} / {{ formatSize(checkpoint.sourceSize, 'file') }}</small></span>
-              <div><i :style="{ width: `${checkpoint.sourceSize ? Math.min(100, checkpoint.transferred / checkpoint.sourceSize * 100) : 0}%` }"></i></div>
-              <span class="transfer-rate">{{ checkpointSession(checkpoint) ? '服务器已连接' : '等待重新连接服务器' }}</span>
-              <strong>可恢复</strong>
-              <button :disabled="!checkpointSession(checkpoint)" @click="runRecoveredTransfer(checkpoint, true)">继续</button>
-              <button :disabled="!checkpointSession(checkpoint)" @click="runRecoveredTransfer(checkpoint, false)">重新开始</button>
-              <button @click="preserveCheckpointTemporaryFile(checkpoint)">保留临时文件</button>
-              <button :disabled="checkpoint.direction === 'upload' && !checkpointSession(checkpoint)" @click="discardCheckpointTemporaryFile(checkpoint)">删除临时文件</button>
-            </div>
-          </div>
           <div v-if="visibleTransfers.length" class="transfer-queue">
-            <div class="transfer-queue-heading"><span>传输队列（{{ visibleTransfers.length }}）</span><button @click="clearFinishedTransfers">清除已完成</button></div>
-            <div v-for="item in visibleTransfers" :key="item.transferId" class="upload-strip" :class="item.state"><span>{{ item.direction === 'upload' ? '上传' : '下载' }} {{ item.fileName }}<small v-if="item.resumedFrom">已续传 {{ formatSize(item.resumedFrom, 'file') }}</small></span><div><i :style="{ width: `${transferProgress(item)}%` }"></i></div><span class="transfer-rate">{{ item.state === 'running' ? `${formatRate(item.speedBytesPerSecond)} · 剩余 ${formatEta(item.etaSeconds)}` : '' }}</span><strong>{{ item.state === 'completed' ? '完成' : item.state === 'failed' ? '失败' : item.state === 'cancelled' ? '已取消' : `${transferProgress(item)}%` }}</strong><button v-if="item.state === 'running'" @click="cancelTransfer(item)">取消</button><button v-else-if="item.state !== 'completed'" @click="retryTransfer(item)">重试</button></div>
+            <div class="transfer-queue-heading">
+              <span>传输队列（{{ visibleTransfers.length }}）</span>
+              <label class="transfer-concurrency">并发
+                <select :value="transferConcurrency" aria-label="传输并发数" @change="updateTransferConcurrency">
+                  <option v-for="value in 5" :key="value" :value="value">{{ value }}</option>
+                </select>
+              </label>
+              <button @click="clearFinishedTransfers">清除已完成</button>
+            </div>
+            <div v-for="item in visibleTransfers" :key="item.taskId" class="upload-strip" :class="item.state">
+              <span>{{ item.direction === 'upload' ? '上传' : '下载' }} {{ item.fileName }}
+                <small>{{ item.serverLabel }} · {{ item.sourcePath }} → {{ item.targetPath }}</small>
+                <small v-if="item.resumedFrom">已续传 {{ formatSize(item.resumedFrom, 'file') }}</small>
+              </span>
+              <div><i :style="{ width: `${transferProgress(item)}%` }"></i></div>
+              <span class="transfer-rate">{{ item.state === 'running' ? `${formatRate(item.speedBytesPerSecond)} · 剩余 ${formatEta(item.etaSeconds)}` : (item.message ?? '') }}</span>
+              <strong>{{ transferStatusText(item) }}</strong>
+              <button v-if="item.state === 'running' && item.allowPause" @click="pauseTransferTask(item)">暂停</button>
+              <button v-if="item.state === 'paused'" @click="resumeTransferTask(item)">继续</button>
+              <button v-if="item.state === 'failed' || item.state === 'cancelled'" @click="retryTransferTask(item)">重试</button>
+              <button v-if="item.state === 'queued' || item.state === 'running' || item.state === 'paused'" @click="cancelTransferTask(item, false)">取消并保留</button>
+              <button v-if="item.state !== 'completed' && item.state !== 'pausing' && item.checkpointAvailable" class="danger-button" @click="cancelTransferTask(item, true)">删除断点</button>
+            </div>
           </div>
           <div v-if="activeSftpState.notice" class="sftp-notice">{{ activeSftpState.notice }}</div>
           <div v-if="sftpError" class="sftp-error">{{ sftpError }}</div>
