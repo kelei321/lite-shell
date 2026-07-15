@@ -177,6 +177,46 @@ export type TransferEvent = {
 };
 
 export type ConflictStrategy = "overwrite" | "skip" | "rename";
+export type TransferQueueState =
+  | "queued"
+  | "running"
+  | "pausing"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type TransferQueueTask = {
+  version: number;
+  taskId: string;
+  attemptId?: string;
+  sessionId?: string;
+  availableSessionId?: string;
+  serverId: string;
+  serverLabel: string;
+  direction: "upload" | "download";
+  sourcePath: string;
+  targetPath: string;
+  fileName: string;
+  conflictStrategy: ConflictStrategy;
+  state: TransferQueueState;
+  transferred: number;
+  total: number;
+  speedBytesPerSecond: number;
+  etaSeconds?: number | null;
+  resumedFrom: number;
+  message?: string;
+  checkpointAvailable: boolean;
+  allowPause: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TransferQueueSnapshot = {
+  concurrency: number;
+  tasks: TransferQueueTask[];
+};
+
 export type DirectoryConflictStrategy = "merge" | "skip" | "rename" | "replace";
 export type LocalPathKind = "missing" | "file" | "directory" | "symlink" | "other";
 
@@ -303,6 +343,40 @@ export const deleteSftpTransferCheckpoint = (taskId: string) =>
 export const discardSftpTransferCheckpoint = (taskId: string, sessionId?: string) =>
   invoke<void>("sftp_discard_transfer_checkpoint", { taskId, sessionId });
 
+export const listSftpTransferQueue = () =>
+  invoke<TransferQueueSnapshot>("sftp_queue_list");
+
+export const enqueueSftpTransfer = (request: {
+  sessionId: string;
+  serverLabel: string;
+  direction: "upload" | "download";
+  localPath: string;
+  remotePath: string;
+  conflictStrategy: ConflictStrategy;
+  allowPause?: boolean;
+}) => invoke<TransferQueueTask>("sftp_queue_enqueue", { request });
+
+export const pauseSftpTransfer = (taskId: string) =>
+  invoke<void>("sftp_queue_pause", { taskId });
+
+export const resumeSftpTransfer = (taskId: string) =>
+  invoke<void>("sftp_queue_resume", { taskId });
+
+export const retrySftpTransfer = (taskId: string) =>
+  invoke<void>("sftp_queue_retry", { taskId });
+
+export const cancelQueuedSftpTransfer = (taskId: string, deletePartial: boolean) =>
+  invoke<void>("sftp_queue_cancel", { taskId, deletePartial });
+
+export const clearCompletedSftpTransfers = () =>
+  invoke<void>("sftp_queue_clear_completed");
+
+export const setSftpTransferConcurrency = (concurrency: number) =>
+  invoke<void>("sftp_queue_set_concurrency", { concurrency });
+
+export const wakeSftpTransferQueue = () =>
+  invoke<void>("sftp_queue_wake");
+
 export const getLocalDirectoryManifest = (path: string, scanId: string) =>
   invoke<LocalDirectoryManifest>("sftp_local_directory_manifest", { path, scanId });
 
@@ -353,6 +427,9 @@ export const deleteSftpDirectoryRecursive = (sessionId: string, path: string) =>
 
 export const listenSftpTransfers = (handler: (event: TransferEvent) => void): Promise<UnlistenFn> =>
   listen<TransferEvent>("sftp-transfer", ({ payload }) => handler(payload));
+
+export const listenSftpQueueTasks = (handler: (task: TransferQueueTask) => void): Promise<UnlistenFn> =>
+  listen<TransferQueueTask>("sftp-queue-task", ({ payload }) => handler(payload));
 
 export const fetchSystemMetrics = (sessionId: string) =>
   invoke<SystemMetrics>("system_metrics", { sessionId });

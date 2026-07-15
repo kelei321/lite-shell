@@ -81,6 +81,13 @@ pub struct TransferQueueTask {
     updated_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferQueueSnapshot {
+    concurrency: u8,
+    tasks: Vec<TransferQueueTask>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnqueueTransferRequest {
@@ -162,14 +169,17 @@ pub async fn sftp_queue_list(
     app: AppHandle,
     queue: State<'_, SftpTransferQueue>,
     manager: State<'_, SessionManager>,
-) -> Result<Vec<TransferQueueTask>, CommandError> {
+) -> Result<TransferQueueSnapshot, CommandError> {
     ensure_initialized(&app, &queue).await?;
-    let mut tasks = queue.inner.lock().await.tasks.clone();
+    let (concurrency, mut tasks) = {
+        let inner = queue.inner.lock().await;
+        (inner.concurrency, inner.tasks.clone())
+    };
     for task in &mut tasks {
         task.available_session_id = matching_session_id(&manager, &task.server_id).await;
     }
     tasks.sort_by_key(|task| std::cmp::Reverse(task.created_at));
-    Ok(tasks)
+    Ok(TransferQueueSnapshot { concurrency, tasks })
 }
 
 #[tauri::command]
