@@ -1,0 +1,50 @@
+name: PR12 Finalize Docs
+
+on:
+  pull_request:
+    types: [reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 12
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v5
+        with:
+          ref: feat/sftp-directory-tree
+          fetch-depth: 0
+
+      - name: Finalize documentation
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python -B -m py_compile scripts/finalize_pr12_docs.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B scripts/finalize_pr12_docs.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Remove temporary files
+        shell: pwsh
+        run: |
+          Remove-Item scripts/finalize_pr12_docs.py -Force
+          Remove-Item .github/workflows/pr12-finalize-docs.yml -Force
+
+      - name: Commit and push
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) { exit 0 }
+          git commit -m "docs: record directory tree validation gate"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git push origin HEAD:feat/sftp-directory-tree
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
