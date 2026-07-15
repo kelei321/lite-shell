@@ -167,26 +167,31 @@ button:focus-visible, input:focus-visible { outline: 2px solid #43a8e8; outline-
 .toolbar-button:hover { background: #23404d; }
 .toolbar-button.danger:not(:disabled) { color: #ffb0b5; }
 .toolbar-button.danger:hover:not(:disabled) { background: #412832; border-color: #70434e; }
-.transfer-queue { max-height: 126px; flex: none; overflow: auto; border-bottom: 1px solid #2c4450; }
-.transfer-queue-heading { height: 27px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; color: #91a4ae; background: #102632; font-size: 11px; }
+.transfer-queue { max-height: 218px; flex: none; overflow: auto; border-bottom: 1px solid #2c4450; }
+.transfer-queue-heading { position: sticky; z-index: 2; top: 0; height: 30px; display: flex; align-items: center; gap: 12px; padding: 0 12px; color: #91a4ae; background: #102632; font-size: 11px; }
+.transfer-queue-heading > span { margin-right: auto; }
 .transfer-queue-heading button { border: 0; color: #8ea1aa; background: transparent; cursor: pointer; font-size: 10px; }
 .transfer-queue-heading button:hover { color: #d5e0e5; }
-.upload-strip { min-height: 34px; display: grid; grid-template-columns: minmax(150px, auto) minmax(80px, 1fr) 160px 44px 38px; align-items: center; gap: 10px; padding: 0 12px; color: #aebcc3; background: #102834; border-bottom: 1px solid #2c4450; font-size: 11px; }
-.upload-strip > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.upload-strip > span:first-child small { margin-left: 7px; color: #69bde9; }
-.transfer-rate { color: #8097a2; text-align: right; }
+.transfer-concurrency { display: flex; align-items: center; gap: 5px; color: #80949e; }
+.transfer-concurrency select { height: 22px; padding: 0 18px 0 6px; border: 1px solid #334d59; border-radius: 3px; color: #c2d0d6; background: #122c38; font-size: 10px; }
+.upload-strip { min-width: 980px; min-height: 52px; display: grid; grid-template-columns: minmax(230px, 1.35fr) minmax(90px, .75fr) minmax(170px, .85fr) 60px; grid-auto-flow: column; grid-auto-columns: max-content; align-items: center; gap: 10px; padding: 5px 12px; color: #aebcc3; background: #102834; border-bottom: 1px solid #2c4450; font-size: 11px; }
+.upload-strip > span:first-child { min-width: 0; display: grid; gap: 2px; overflow: hidden; }
+.upload-strip > span:first-child > small { display: block; min-width: 0; margin: 0; overflow: hidden; color: #69bde9; text-overflow: ellipsis; white-space: nowrap; }
+.upload-strip > span:first-child > small:first-of-type { color: #8199a5; }
+.transfer-rate { min-width: 0; overflow: hidden; color: #8097a2; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .upload-strip > div { height: 4px; background: #263e49; }
 .upload-strip i { display: block; height: 100%; background: #4caee9; }
-.upload-strip strong { color: var(--green); font-weight: 500; }
+.upload-strip strong { color: var(--green); font-weight: 500; white-space: nowrap; }
+.upload-strip.queued strong { color: #89b6ce; }
+.upload-strip.pausing strong, .upload-strip.paused strong { color: #f0bd68; }
 .upload-strip.completed i { background: #66c97b; }
 .upload-strip.failed i { background: #dc6871; }
 .upload-strip.failed strong { color: #ff949c; }
 .upload-strip.cancelled i { background: #7e8d95; }
 .upload-strip.cancelled strong { color: #a5b1b7; }
-.upload-strip > button { border: 0; color: #79bfe8; background: transparent; cursor: pointer; font-size: 10px; }
-.checkpoint-queue { max-height: 178px; }
-.checkpoint-queue .upload-strip { grid-template-columns: minmax(170px, auto) minmax(70px, 1fr) 132px 48px repeat(4, max-content); }
-.checkpoint-queue .upload-strip > button:disabled { color: #5d7079; cursor: not-allowed; }
+.upload-strip > button { border: 0; color: #79bfe8; background: transparent; cursor: pointer; font-size: 10px; white-space: nowrap; }
+.upload-strip > button:hover { color: #b8e2f8; }
+.upload-strip > button.danger-button { color: #ff9ca4; }
 .sftp-scan-status, .sftp-notice { padding: 7px 12px; border-bottom: 1px solid #345364; background: #172f3b; color: #9fd6f1; font-size: 11px; }
 .sftp-scan-status { display: flex; align-items: center; justify-content: space-between; }
 .sftp-scan-status button { border: 0; background: transparent; color: #79bfe8; cursor: pointer; }
