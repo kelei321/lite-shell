@@ -276,3 +276,7 @@ button.file-row.selected { background: #173746; box-shadow: inset 2px 0 #58b7fb;
   .toolbar-button { padding-inline: 9px; }
   .session-tab { min-width: 140px; }
 }
+
+.conflict-explanation { color: #a9bac3; font-size: 12px; line-height: 1.55; }
+.conflict-dialog .danger-button { color: #ffd9dc; border-color: #8a4148; background: #5a2930; }
+.conflict-dialog .danger-button:hover { background: #71343c; }

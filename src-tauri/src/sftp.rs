@@ -282,50 +282,6 @@ pub async fn sftp_cancel_transfer(
 }
 
 #[tauri::command]
-pub async fn sftp_prepare_local_directory(
-    path: String,
-    conflict_strategy: ConflictStrategy,
-) -> Result<TransferResult, CommandError> {
-    if path.trim().is_empty() {
-        return Err(CommandError::new(
-            "LOCAL_DIRECTORY_INVALID",
-            "本地目录不能为空",
-        ));
-    }
-    let existing = fs::metadata(&path).await.ok();
-    if let Some(metadata) = &existing {
-        ensure_directory_target(
-            metadata.is_dir(),
-            "LOCAL_TARGET_IS_FILE",
-            "目标路径已存在同名文件",
-        )?;
-    }
-    let target_path = if existing.is_some() {
-        match conflict_strategy {
-            ConflictStrategy::Overwrite => path,
-            ConflictStrategy::Skip => {
-                return Ok(TransferResult {
-                    path,
-                    skipped: true,
-                    resumed_from: 0,
-                });
-            }
-            ConflictStrategy::Rename => unique_local_path(&path).await,
-        }
-    } else {
-        path
-    };
-    fs::create_dir_all(&target_path)
-        .await
-        .map_err(|error| CommandError::new("LOCAL_DIRECTORY_CREATE_FAILED", error.to_string()))?;
-    Ok(TransferResult {
-        path: target_path,
-        skipped: false,
-        resumed_from: 0,
-    })
-}
-
-#[tauri::command]
 pub async fn sftp_list(
     manager: State<'_, SessionManager>,
     session_id: String,
@@ -1737,24 +1693,6 @@ mod tests {
         );
         assert!(ensure_file_target(false, "unused", "unused").is_ok());
         assert!(ensure_directory_target(true, "unused", "unused").is_ok());
-    }
-
-    #[tokio::test]
-    async fn refuses_to_prepare_a_directory_over_an_existing_file() {
-        let target = std::env::temp_dir().join(format!(
-            "liteshell-directory-conflict-{}",
-            std::process::id()
-        ));
-        fs::write(&target, b"file").await.unwrap();
-        let error = sftp_prepare_local_directory(
-            target.to_string_lossy().into_owned(),
-            ConflictStrategy::Overwrite,
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.code, "LOCAL_TARGET_IS_FILE");
-        assert!(fs::metadata(&target).await.unwrap().is_file());
-        fs::remove_file(target).await.unwrap();
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # LiteShell SFTP 修改计划
 
 更新时间：2026-07-14  
-状态：实施进行中，PR1～PR5 已完成，PR6 已实现并待 CI/合并验证
+状态：实施进行中，PR1～PR6 已完成，PR7 已通过验证并等待合并
 执行原则：先修复数据安全和一致性问题，再完善传输可靠性，最后扩展交互功能。
 
 ## 1. 文档定位
@@ -105,8 +105,8 @@ npm run desktop
 | PR3 | 文件与目录冲突保护 | `fix/sftp-entry-type-conflicts` | 已完成 | PR2 |
 | PR4 | 统一传输终态和清理 | `fix/sftp-transfer-finalization` | 已完成 | PR3 |
 | PR5 | 安全断点续传和任务检查点 | `feat/sftp-safe-resume-checkpoint` | 已完成 | PR4 |
-| PR6 | 递归传输和符号链接安全 | `fix/sftp-recursive-transfer-safety` | 待验证 | PR5 |
-| PR7 | 明确目录冲突语义 | `feat/sftp-directory-conflict-strategies` | 待开始 | PR6 |
+| PR6 | 递归传输和符号链接安全 | `fix/sftp-recursive-transfer-safety` | 已完成 | PR5 |
+| PR7 | 明确目录冲突语义 | `feat/sftp-directory-conflict-strategies` | 待验证 | PR6 |
 | PR8 | 后端统一传输队列、暂停和恢复 | `feat/sftp-transfer-queue` | 待开始 | PR7 |
 | PR9 | SFTP 导航与批量操作完善 | `feat/sftp-navigation-and-batch-actions` | 待开始 | PR8 |
 
@@ -605,7 +605,7 @@ updatedAt
 - manifest 返回文件数、目录数、总大小、跳过链接数、跳过不支持项和 warnings，UI 明确展示跳过汇总。
 - 新增边界、限制、取消、本地 manifest 和 Unix 符号链接测试；Windows junction 仍需本地实机验证。
 
-验证：等待 GitHub Actions；未执行真实服务器写入测试。
+验证：PR #8 Frontend 与 Rust CI 已通过并 squash 合并；未执行真实服务器写入测试。
 
 本地待测：Windows junction 循环、远程 symlink 指向根外、深层目录、超大量小文件和扫描取消。
 
@@ -615,7 +615,7 @@ updatedAt
 
 ## 11. PR7：明确目录冲突语义
 
-状态：`待开始`
+状态：`待验证`
 
 ### 目标
 
@@ -672,7 +672,22 @@ updatedAt
 
 ### 完成记录
 
-尚未开始。
+实现内容：
+
+- 文件冲突继续使用覆盖、跳过和重命名，目录冲突独立为合并、跳过、重命名和替换。
+- 文件与目录的批次“应用到全部”状态分开维护，不再共用同一个策略。
+- 本地和远程目录统一通过后端准备命令处理，重命名生成稳定的新目录名称。
+- 目录替换使用不透明 replacement ID 绑定目标、staging、备份和服务器身份。
+- 替换内容先写入独立 staging 目录；复制失败只删除 staging，原目录保持不变。提交时再执行原目录备份和 staging 切换。
+- 复制成功后提交删除备份；服务器不支持安全 rename 时明确拒绝，不会静默递归删除原目录。
+- UI 明确说明合并保留额外内容、替换删除额外内容，并对替换进行二次确认。
+- 新增本地合并、跳过、重命名、替换提交和失败回滚测试。
+
+验证：GitHub Actions CI run `29311102314` 已通过 Frontend 类型检查/构建、Rust 格式、单元测试和 Clippy；未执行真实服务器写入测试。
+
+本地待测：本地目录替换、远程目录 merge/replace、远程 rename 不支持、最终 rename 切换中断与 staging/backup 残留恢复。
+
+下一步：PR8：后端统一传输队列、暂停和恢复。
 
 ---
 

@@ -1,6 +1,7 @@
 mod monitor;
 mod profiles;
 mod sftp;
+mod sftp_directory;
 mod sftp_recursive;
 mod ssh;
 
@@ -13,8 +14,11 @@ use profiles::{
 use sftp::{
     sftp_cancel_transfer, sftp_create_directory, sftp_delete, sftp_delete_recursive,
     sftp_delete_transfer_checkpoint, sftp_discard_transfer_checkpoint, sftp_download, sftp_list,
-    sftp_list_transfer_checkpoints, sftp_prepare_local_directory, sftp_rename, sftp_upload,
-    SftpTransferManager,
+    sftp_list_transfer_checkpoints, sftp_rename, sftp_upload, SftpTransferManager,
+};
+use sftp_directory::{
+    sftp_finish_directory_replacement, sftp_inspect_local_path, sftp_inspect_remote_path,
+    sftp_prepare_local_directory, sftp_prepare_remote_directory, DirectoryReplacementManager,
 };
 use sftp_recursive::{sftp_local_directory_manifest, sftp_remote_directory_manifest};
 use ssh::{ssh_connect, ssh_connect_profile, ssh_disconnect, ssh_resize, ssh_send, SessionManager};
@@ -26,6 +30,7 @@ pub fn run() {
         .manage(SessionManager::default())
         .manage(SystemMonitor::default())
         .manage(SftpTransferManager::default())
+        .manage(DirectoryReplacementManager::default())
         .invoke_handler(tauri::generate_handler![
             ssh_connect,
             ssh_connect_profile,
@@ -52,7 +57,11 @@ pub fn run() {
             sftp_discard_transfer_checkpoint,
             sftp_local_directory_manifest,
             sftp_remote_directory_manifest,
+            sftp_inspect_local_path,
+            sftp_inspect_remote_path,
             sftp_prepare_local_directory,
+            sftp_prepare_remote_directory,
+            sftp_finish_directory_replacement,
             sftp_create_directory,
             sftp_rename,
             sftp_delete,

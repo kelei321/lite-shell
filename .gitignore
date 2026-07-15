@@ -14,6 +14,8 @@ target/
 src-tauri/gen/
 
 # Local development files
+__pycache__/
+*.py[cod]
 .idea/
 .vscode/
 *.log
