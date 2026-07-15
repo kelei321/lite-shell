@@ -60,6 +60,12 @@ export function reconcileSelection(
   return entries.filter((entry) => selectedPaths.has(entry.path));
 }
 
+export function selectionsMatchSnapshot(currentPaths: string[], snapshotPaths: string[]): boolean {
+  if (currentPaths.length !== snapshotPaths.length) return false;
+  const current = new Set(currentPaths);
+  return current.size === snapshotPaths.length && snapshotPaths.every((path) => current.has(path));
+}
+
 export function updateSelectionPaths(
   orderedPaths: string[],
   selectedPaths: string[],
