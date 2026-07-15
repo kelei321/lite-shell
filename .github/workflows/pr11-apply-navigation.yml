@@ -32,6 +32,16 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
 
+      - name: Fix clipboard newline escaping
+        shell: pwsh
+        run: |
+          $path = "scripts/apply_pr11_navigation.py"
+          $content = Get-Content $path -Raw
+          $old = 'join("\n")'
+          $new = 'join("\\n")'
+          if (-not $content.Contains($old)) { throw "clipboard join pattern not found" }
+          Set-Content -Path $path -Value $content.Replace($old, $new) -Encoding utf8
+
       - name: Apply navigation patch
         shell: pwsh
         env:
