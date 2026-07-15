@@ -1114,7 +1114,11 @@ function transferProgress(item: TransferQueueTask) {
 }
 
 function transferStatusText(item: TransferQueueTask) {
-  if (item.state === "queued") return item.availableSessionId ? "排队中" : "等待连接";
+  if (item.state === "queued") {
+    const connected = Boolean(item.availableSessionId)
+      || sessions.value.some((session) => session.connected && session.id === item.sessionId);
+    return connected ? "排队中" : "等待连接";
+  }
   if (item.state === "running") return `${transferProgress(item)}%`;
   if (item.state === "pausing") return "正在停止";
   if (item.state === "paused") return "已暂停";

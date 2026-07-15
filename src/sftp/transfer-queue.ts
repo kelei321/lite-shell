@@ -11,6 +11,10 @@ import {
   type ConflictStrategy,
   type TransferQueueTask,
 } from "../services/ssh";
+import {
+  mergeTransferQueueSnapshot,
+  shouldApplyTransferTask,
+} from "./transfer-queue-state";
 
 type QueueRequest = {
   sessionId: string;
@@ -66,16 +70,21 @@ export function useSftpTransferQueue() {
 
   function handleTransfer(task: TransferQueueTask) {
     const index = transfers.value.findIndex((item) => item.taskId === task.taskId);
-    if (index >= 0) transfers.value[index] = task;
-    else transfers.value.push(task);
-    settleWaiters(task);
+    const current = index >= 0 ? transfers.value[index] : undefined;
+    if (!shouldApplyTransferTask(current, task)) return;
+    const next = current?.availableSessionId && !task.availableSessionId
+      ? { ...task, availableSessionId: current.availableSessionId }
+      : task;
+    if (index >= 0) transfers.value[index] = next;
+    else transfers.value.push(next);
+    settleWaiters(next);
   }
 
   async function refreshTransferQueue() {
     const snapshot = await listSftpTransferQueue();
     transferConcurrency.value = snapshot.concurrency;
-    transfers.value = snapshot.tasks;
-    for (const task of snapshot.tasks) settleWaiters(task);
+    transfers.value = mergeTransferQueueSnapshot(transfers.value, snapshot);
+    for (const task of transfers.value) settleWaiters(task);
   }
 
   async function enqueueTransfer(request: QueueRequest) {

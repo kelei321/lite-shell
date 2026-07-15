@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     fs,
-    sync::{Mutex as AsyncMutex, Notify, OnceCell},
+    sync::{broadcast, Mutex as AsyncMutex, Notify, OnceCell},
 };
 
 use crate::{
@@ -26,6 +26,7 @@ const DEFAULT_CONCURRENCY: u8 = 3;
 const MAX_CONCURRENCY: u8 = 5;
 const MAX_TASKS: usize = 10_000;
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+static QUEUE_CLOCK: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -84,6 +85,7 @@ pub struct TransferQueueTask {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferQueueSnapshot {
+    generated_at: u64,
     concurrency: u8,
     tasks: Vec<TransferQueueTask>,
 }
@@ -171,6 +173,7 @@ pub async fn sftp_queue_list(
     manager: State<'_, SessionManager>,
 ) -> Result<TransferQueueSnapshot, CommandError> {
     ensure_initialized(&app, &queue).await?;
+    let generated_at = unix_now();
     let (concurrency, mut tasks) = {
         let inner = queue.inner.lock().await;
         (inner.concurrency, inner.tasks.clone())
@@ -179,7 +182,11 @@ pub async fn sftp_queue_list(
         task.available_session_id = matching_session_id(&manager, &task.server_id).await;
     }
     tasks.sort_by_key(|task| std::cmp::Reverse(task.created_at));
-    Ok(TransferQueueSnapshot { concurrency, tasks })
+    Ok(TransferQueueSnapshot {
+        generated_at,
+        concurrency,
+        tasks,
+    })
 }
 
 #[tauri::command]
@@ -516,9 +523,10 @@ async fn ensure_initialized(
             }
             persist_current(app, queue).await?;
 
+            let progress_receiver = app.state::<SftpTransferManager>().subscribe();
             let progress_app = app.clone();
             tauri::async_runtime::spawn(async move {
-                progress_loop(progress_app).await;
+                progress_loop(progress_app, progress_receiver).await;
             });
             let dispatcher_app = app.clone();
             tauri::async_runtime::spawn(async move {
@@ -868,8 +876,7 @@ async fn finish_worker_error(app: &AppHandle, task_id: &str, error: CommandError
     queue.notify.notify_one();
 }
 
-async fn progress_loop(app: AppHandle) {
-    let mut receiver = app.state::<SftpTransferManager>().subscribe();
+async fn progress_loop(app: AppHandle, mut receiver: broadcast::Receiver<TransferEvent>) {
     loop {
         let event = match receiver.recv().await {
             Ok(event) => event,
@@ -1086,10 +1093,26 @@ fn new_id(prefix: &str) -> String {
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    let wall = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros(),
+    )
+    .unwrap_or(u64::MAX);
+    let mut observed = QUEUE_CLOCK.load(Ordering::Relaxed);
+    loop {
+        let next = wall.max(observed.saturating_add(1));
+        match QUEUE_CLOCK.compare_exchange_weak(
+            observed,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return next,
+            Err(current) => observed = current,
+        }
+    }
 }
 
 fn default_allow_pause() -> bool {
@@ -1146,6 +1169,13 @@ mod tests {
             .take(usize::from(concurrency).saturating_sub(running))
             .map(|task| task.task_id.clone())
             .collect()
+    }
+
+    #[test]
+    fn queue_timestamps_are_strictly_monotonic() {
+        let first = unix_now();
+        let second = unix_now();
+        assert!(second > first);
     }
 
     #[test]

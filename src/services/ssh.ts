@@ -213,6 +213,7 @@ export type TransferQueueTask = {
 };
 
 export type TransferQueueSnapshot = {
+  generatedAt: number;
   concurrency: number;
   tasks: TransferQueueTask[];
 };
