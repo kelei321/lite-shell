@@ -1,0 +1,69 @@
+name: PR10 Apply Queue Race Fixes
+
+on:
+  pull_request:
+    types: [reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v5
+        with:
+          ref: feat/sftp-transfer-queue
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Apply race fixes
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python scripts/apply_pr10_queue_race_fixes.py
+
+      - name: Format Rust
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate frontend
+        run: |
+          npm run test:frontend
+          npm run typecheck
+          npm run build
+
+      - name: Validate Rust
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious
+
+      - name: Remove temporary files
+        run: rm -f scripts/apply_pr10_queue_race_fixes.py .github/workflows/pr10-apply-race-fixes.yml
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "fix: make transfer queue updates monotonic"
+          git push origin HEAD:feat/sftp-transfer-queue
