@@ -1,0 +1,86 @@
+name: PR10 Apply Docs And Styles
+
+on:
+  pull_request:
+    types: [reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 10
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v5
+        with:
+          ref: feat/sftp-transfer-queue
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Apply docs and styles patch
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python scripts/apply_pr10_docs_styles.py
+
+      - name: Format check
+        shell: pwsh
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate frontend
+        shell: pwsh
+        run: |
+          npm run test:frontend
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate Rust
+        shell: pwsh
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Remove temporary files
+        shell: pwsh
+        run: |
+          Remove-Item scripts/apply_pr10_docs_styles.py -Force
+          Remove-Item .github/workflows/pr10-apply-docs-styles.yml -Force
+
+      - name: Commit and push
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Output "No changes to commit"
+            exit 0
+          }
+          git commit -m "docs: complete persistent transfer queue plan"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git push origin HEAD:feat/sftp-transfer-queue
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
