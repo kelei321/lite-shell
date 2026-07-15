@@ -68,7 +68,7 @@ pub struct TransferQueueTask {
     task_id: String,
     attempt_id: Option<String>,
     session_id: Option<String>,
-    #[serde(skip)]
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     available_session_id: Option<String>,
     server_id: String,
     server_label: String,
@@ -310,6 +310,7 @@ pub async fn sftp_queue_resume(
         inner.tasks[index].speed_bytes_per_second = 0;
         inner.tasks[index].eta_seconds = None;
         inner.tasks[index].updated_at = unix_now();
+        inner.restored_waiting.insert(task_id.clone());
         inner.tasks[index].clone()
     };
     persist_current(&app, &queue).await?;
@@ -349,6 +350,7 @@ pub async fn sftp_queue_retry(
         inner.tasks[index].speed_bytes_per_second = 0;
         inner.tasks[index].eta_seconds = None;
         inner.tasks[index].updated_at = unix_now();
+        inner.restored_waiting.insert(task_id.clone());
         inner.tasks[index].clone()
     };
     persist_current(&app, &queue).await?;
@@ -654,15 +656,9 @@ async fn dispatch_one(app: &AppHandle) -> Result<bool, CommandError> {
                 if inner.tasks[index].state != QueueTaskState::Queued {
                     continue;
                 }
-                if inner.restored_waiting.contains(&candidate.task_id) {
-                    if inner.tasks[index].message.as_deref() != Some("等待重新连接服务器") {
-                        inner.tasks[index].message = Some("等待重新连接服务器".to_owned());
-                        inner.tasks[index].updated_at = unix_now();
-                        changed_task = Some(inner.tasks[index].clone());
-                    }
-                } else {
-                    inner.tasks[index].state = QueueTaskState::Failed;
-                    inner.tasks[index].message = Some("SSH 会话已断开，请重新连接后重试".to_owned());
+                inner.restored_waiting.insert(candidate.task_id.clone());
+                if inner.tasks[index].message.as_deref() != Some("等待重新连接服务器") {
+                    inner.tasks[index].message = Some("等待重新连接服务器".to_owned());
                     inner.tasks[index].updated_at = unix_now();
                     changed_task = Some(inner.tasks[index].clone());
                 }
@@ -782,6 +778,7 @@ async fn finish_worker_success(app: &AppHandle, task_id: &str, result: TransferR
         };
         inner.running.remove(task_id);
         inner.actions.remove(task_id);
+        inner.tasks[index].attempt_id = None;
         inner.tasks[index].state = QueueTaskState::Completed;
         inner.tasks[index].transferred = inner.tasks[index].total;
         inner.tasks[index].speed_bytes_per_second = 0;
@@ -822,13 +819,16 @@ async fn finish_worker_error(app: &AppHandle, task_id: &str, error: CommandError
         };
         inner.running.remove(task_id);
         inner.actions.remove(task_id);
+        inner.tasks[index].attempt_id = None;
         match action {
             Some(RequestedAction::Pause) => {
                 inner.tasks[index].state = QueueTaskState::Paused;
+                inner.tasks[index].checkpoint_available = true;
                 inner.tasks[index].message = Some("任务已安全暂停".to_owned());
             }
             Some(RequestedAction::CancelKeep) => {
                 inner.tasks[index].state = QueueTaskState::Cancelled;
+                inner.tasks[index].checkpoint_available = true;
                 inner.tasks[index].message = Some("任务已取消，断点已保留".to_owned());
             }
             Some(RequestedAction::CancelDelete) => match discard_result {
@@ -885,17 +885,17 @@ async fn apply_progress_event(app: &AppHandle, event: TransferEvent) {
     let queue = app.state::<SftpTransferQueue>();
     let (task, action) = {
         let mut inner = queue.inner.lock().await;
-        let Some(index) = inner.tasks.iter().position(|task| {
-            task.attempt_id.as_deref() == Some(event.transfer_id.as_str())
-        }) else {
+        let Some(index) = inner
+            .tasks
+            .iter()
+            .position(|task| task.attempt_id.as_deref() == Some(event.transfer_id.as_str()))
+        else {
             return;
         };
         if !inner.tasks[index].state.is_running() {
             return;
         }
-        inner.tasks[index].transferred = inner.tasks[index]
-            .transferred
-            .max(event.transferred);
+        inner.tasks[index].transferred = inner.tasks[index].transferred.max(event.transferred);
         inner.tasks[index].total = event.total;
         inner.tasks[index].speed_bytes_per_second = event.speed_bytes_per_second;
         inner.tasks[index].eta_seconds = event.eta_seconds;
@@ -955,9 +955,8 @@ async fn load_queue_store(app: &AppHandle) -> Result<QueueStore, CommandError> {
             ))
         }
     };
-    let store: QueueStore = serde_json::from_slice(&content).map_err(|error| {
-        CommandError::new("TRANSFER_QUEUE_INVALID", error.to_string())
-    })?;
+    let store: QueueStore = serde_json::from_slice(&content)
+        .map_err(|error| CommandError::new("TRANSFER_QUEUE_INVALID", error.to_string()))?;
     if store.version > QUEUE_VERSION {
         return Err(CommandError::new(
             "TRANSFER_QUEUE_VERSION_UNSUPPORTED",
@@ -967,10 +966,7 @@ async fn load_queue_store(app: &AppHandle) -> Result<QueueStore, CommandError> {
     Ok(store)
 }
 
-async fn persist_current(
-    app: &AppHandle,
-    queue: &SftpTransferQueue,
-) -> Result<(), CommandError> {
+async fn persist_current(app: &AppHandle, queue: &SftpTransferQueue) -> Result<(), CommandError> {
     let _guard = queue.persist_lock.lock().await;
     let store = {
         let inner = queue.inner.lock().await;
@@ -983,23 +979,19 @@ async fn persist_current(
     persist_queue_store(app, &store).await
 }
 
-async fn persist_queue_store(
-    app: &AppHandle,
-    store: &QueueStore,
-) -> Result<(), CommandError> {
+async fn persist_queue_store(app: &AppHandle, store: &QueueStore) -> Result<(), CommandError> {
     let path = queue_store_path(app)?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await.map_err(|error| {
-            CommandError::new("TRANSFER_QUEUE_WRITE_FAILED", error.to_string())
-        })?;
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|error| CommandError::new("TRANSFER_QUEUE_WRITE_FAILED", error.to_string()))?;
     }
     let temporary = path.with_extension("json.tmp");
-    let content = serde_json::to_vec_pretty(store).map_err(|error| {
-        CommandError::new("TRANSFER_QUEUE_WRITE_FAILED", error.to_string())
-    })?;
-    fs::write(&temporary, content).await.map_err(|error| {
-        CommandError::new("TRANSFER_QUEUE_WRITE_FAILED", error.to_string())
-    })?;
+    let content = serde_json::to_vec_pretty(store)
+        .map_err(|error| CommandError::new("TRANSFER_QUEUE_WRITE_FAILED", error.to_string()))?;
+    fs::write(&temporary, content)
+        .await
+        .map_err(|error| CommandError::new("TRANSFER_QUEUE_WRITE_FAILED", error.to_string()))?;
     let source = temporary.clone();
     let destination = path.clone();
     tokio::task::spawn_blocking(move || replace_file(&source, &destination))
@@ -1150,8 +1142,7 @@ mod tests {
         tasks
             .iter()
             .filter(|task| {
-                task.state == QueueTaskState::Queued
-                    && available_servers.contains(&task.server_id)
+                task.state == QueueTaskState::Queued && available_servers.contains(&task.server_id)
             })
             .take(usize::from(concurrency).saturating_sub(running))
             .map(|task| task.task_id.clone())

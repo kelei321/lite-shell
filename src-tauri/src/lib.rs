@@ -22,8 +22,8 @@ use sftp_directory::{
     sftp_prepare_local_directory, sftp_prepare_remote_directory, DirectoryReplacementManager,
 };
 use sftp_queue::{
-    initialize_transfer_queue, sftp_queue_cancel, sftp_queue_clear_completed,
-    sftp_queue_enqueue, sftp_queue_list, sftp_queue_pause, sftp_queue_resume, sftp_queue_retry,
+    initialize_transfer_queue, sftp_queue_cancel, sftp_queue_clear_completed, sftp_queue_enqueue,
+    sftp_queue_list, sftp_queue_pause, sftp_queue_resume, sftp_queue_retry,
     sftp_queue_set_concurrency, sftp_queue_wake, SftpTransferQueue,
 };
 use sftp_recursive::{sftp_local_directory_manifest, sftp_remote_directory_manifest};

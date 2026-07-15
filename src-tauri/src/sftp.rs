@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     fs::{self, File, OpenOptions},
     io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
-    sync::{Mutex as AsyncMutex, Semaphore},
+    sync::{broadcast, Mutex as AsyncMutex, Semaphore},
 };
 
 use crate::ssh::{matching_session_id, open_sftp, session_server_id, CommandError, SessionManager};
@@ -25,6 +25,7 @@ pub struct SftpTransferManager {
     active_targets: StdMutex<HashSet<TransferTargetKey>>,
     active_tasks: StdMutex<HashSet<String>>,
     slots: Semaphore,
+    events: broadcast::Sender<TransferEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -140,15 +141,21 @@ impl SftpTransferManager {
     pub(crate) async fn finish_operation(&self, operation_id: &str) {
         self.cancelled.lock().await.remove(operation_id);
     }
+
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<TransferEvent> {
+        self.events.subscribe()
+    }
 }
 
 impl Default for SftpTransferManager {
     fn default() -> Self {
+        let (events, _) = broadcast::channel(1_024);
         Self {
             cancelled: AsyncMutex::new(HashSet::new()),
             active_targets: StdMutex::new(HashSet::new()),
             active_tasks: StdMutex::new(HashSet::new()),
-            slots: Semaphore::new(3),
+            slots: Semaphore::new(5),
+            events,
         }
     }
 }
@@ -160,7 +167,7 @@ pub struct RecursiveDeleteResult {
     deleted_directories: u64,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConflictStrategy {
     Overwrite,
@@ -171,9 +178,9 @@ pub enum ConflictStrategy {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferResult {
-    path: String,
-    skipped: bool,
-    resumed_from: u64,
+    pub(crate) path: String,
+    pub(crate) skipped: bool,
+    pub(crate) resumed_from: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,18 +203,18 @@ pub struct SftpEntry {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TransferEvent {
-    transfer_id: String,
-    session_id: String,
-    direction: &'static str,
-    file_name: String,
-    transferred: u64,
-    total: u64,
-    state: &'static str,
-    message: Option<String>,
-    speed_bytes_per_second: u64,
-    eta_seconds: Option<u64>,
-    resumed_from: u64,
+pub(crate) struct TransferEvent {
+    pub(crate) transfer_id: String,
+    pub(crate) session_id: String,
+    pub(crate) direction: &'static str,
+    pub(crate) file_name: String,
+    pub(crate) transferred: u64,
+    pub(crate) total: u64,
+    pub(crate) state: &'static str,
+    pub(crate) message: Option<String>,
+    pub(crate) speed_bytes_per_second: u64,
+    pub(crate) eta_seconds: Option<u64>,
+    pub(crate) resumed_from: u64,
 }
 
 const CHECKPOINT_VERSION: u8 = 2;
@@ -215,23 +222,23 @@ const CHECKPOINT_VERSION: u8 = 2;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferCheckpoint {
-    version: u8,
-    task_id: String,
-    session_id: String,
-    server_id: String,
-    direction: String,
-    source_path: String,
-    target_path: String,
-    source_size: u64,
-    source_modified_at: Option<u64>,
+    pub(crate) version: u8,
+    pub(crate) task_id: String,
+    pub(crate) session_id: String,
+    pub(crate) server_id: String,
+    pub(crate) direction: String,
+    pub(crate) source_path: String,
+    pub(crate) target_path: String,
+    pub(crate) source_size: u64,
+    pub(crate) source_modified_at: Option<u64>,
     #[serde(default)]
-    source_fingerprint: String,
-    temporary_path: String,
-    transferred: u64,
-    created_at: u64,
-    updated_at: u64,
+    pub(crate) source_fingerprint: String,
+    pub(crate) temporary_path: String,
+    pub(crate) transferred: u64,
+    pub(crate) created_at: u64,
+    pub(crate) updated_at: u64,
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
-    available_session_id: Option<String>,
+    pub(crate) available_session_id: Option<String>,
 }
 
 impl TransferCheckpoint {
@@ -1085,22 +1092,21 @@ fn emit_transfer(
     eta_seconds: Option<u64>,
     resumed_from: u64,
 ) {
-    let _ = app.emit(
-        "sftp-transfer",
-        TransferEvent {
-            transfer_id: transfer_id.to_owned(),
-            session_id: session_id.to_owned(),
-            direction,
-            file_name: file_name.to_owned(),
-            transferred,
-            total,
-            state,
-            message,
-            speed_bytes_per_second,
-            eta_seconds,
-            resumed_from,
-        },
-    );
+    let event = TransferEvent {
+        transfer_id: transfer_id.to_owned(),
+        session_id: session_id.to_owned(),
+        direction,
+        file_name: file_name.to_owned(),
+        transferred,
+        total,
+        state,
+        message,
+        speed_bytes_per_second,
+        eta_seconds,
+        resumed_from,
+    };
+    let _ = app.emit("sftp-transfer", event.clone());
+    let _ = app.state::<SftpTransferManager>().events.send(event);
 }
 
 async fn unique_remote_path(sftp: &SftpSession, path: &str) -> String {
