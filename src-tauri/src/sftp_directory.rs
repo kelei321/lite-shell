@@ -36,6 +36,7 @@ pub struct DirectoryPrepareResult {
 #[serde(rename_all = "camelCase")]
 pub struct LocalPathInspection {
     kind: &'static str,
+    size: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -182,15 +183,26 @@ pub async fn sftp_inspect_local_path(path: String) -> Result<LocalPathInspection
         return Err(CommandError::new("LOCAL_PATH_INVALID", "本地路径不能为空"));
     }
     match fs::symlink_metadata(path.trim()).await {
-        Ok(metadata) if is_local_link_or_reparse(&metadata) => {
-            Ok(LocalPathInspection { kind: "other" })
-        }
-        Ok(metadata) if metadata.is_dir() => Ok(LocalPathInspection { kind: "directory" }),
-        Ok(metadata) if metadata.is_file() => Ok(LocalPathInspection { kind: "file" }),
-        Ok(_) => Ok(LocalPathInspection { kind: "other" }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(LocalPathInspection { kind: "missing" })
-        }
+        Ok(metadata) if is_local_link_or_reparse(&metadata) => Ok(LocalPathInspection {
+            kind: "other",
+            size: None,
+        }),
+        Ok(metadata) if metadata.is_dir() => Ok(LocalPathInspection {
+            kind: "directory",
+            size: None,
+        }),
+        Ok(metadata) if metadata.is_file() => Ok(LocalPathInspection {
+            kind: "file",
+            size: Some(metadata.len()),
+        }),
+        Ok(_) => Ok(LocalPathInspection {
+            kind: "other",
+            size: None,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(LocalPathInspection {
+            kind: "missing",
+            size: None,
+        }),
         Err(error) => Err(CommandError::new(
             "LOCAL_PATH_INSPECTION_FAILED",
             error.to_string(),
