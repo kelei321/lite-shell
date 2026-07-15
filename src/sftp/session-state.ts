@@ -10,10 +10,12 @@ export type SftpSessionState = {
   error: string;
   notice: string;
   selectedEntries: SessionSftpEntry[];
+  selectionAnchorPath?: string;
   history: string[];
   historyIndex: number;
   bookmarks: string[];
   recentPaths: string[];
+  showHiddenFiles: boolean;
   requestVersion: number;
 };
 
@@ -28,10 +30,12 @@ export function createSftpSessionState(sessionId: string): SftpSessionState {
     error: "",
     notice: "",
     selectedEntries: [],
+    selectionAnchorPath: undefined,
     history: [],
     historyIndex: -1,
     bookmarks: [],
     recentPaths: [],
+    showHiddenFiles: false,
     requestVersion: 0,
   };
 }
@@ -47,11 +51,17 @@ export function ensureSftpSessionState(
   return created;
 }
 
-export function beginSftpDirectoryRequest(state: SftpSessionState): number {
+export function beginSftpDirectoryRequest(
+  state: SftpSessionState,
+  preserveSelection = false,
+): number {
   state.requestVersion += 1;
   state.loading = true;
   state.error = "";
-  state.selectedEntries = [];
+  if (!preserveSelection) {
+    state.selectedEntries = [];
+    state.selectionAnchorPath = undefined;
+  }
   return state.requestVersion;
 }
 
