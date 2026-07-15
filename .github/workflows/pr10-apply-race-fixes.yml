@@ -48,15 +48,34 @@ jobs:
           npm run typecheck
           npm run build
 
-      - name: Validate Rust
+      - name: Capture Rust validation
+        id: rust
+        shell: bash
         run: |
-          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious
+          set +e
+          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features > rust-validation.log 2>&1
+          code=$?
+          if [ "$code" -eq 0 ]; then
+            cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious >> rust-validation.log 2>&1
+            code=$?
+          fi
+          tail -n 240 rust-validation.log > rust-validation-tail.txt
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload Rust validation log
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr10-rust-validation-tail
+          path: rust-validation-tail.txt
+          if-no-files-found: error
 
       - name: Remove temporary files
+        if: steps.rust.outputs.exit_code == '0'
         run: rm -f scripts/apply_pr10_queue_race_fixes.py .github/workflows/pr10-apply-race-fixes.yml
 
       - name: Commit and push
+        if: steps.rust.outputs.exit_code == '0'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -67,3 +86,7 @@ jobs:
           fi
           git commit -m "fix: make transfer queue updates monotonic"
           git push origin HEAD:feat/sftp-transfer-queue
+
+      - name: Preserve Rust validation failure
+        if: steps.rust.outputs.exit_code != '0'
+        run: exit 1
