@@ -757,7 +757,8 @@ async function loadDirectoryTreeNode(sessionId: string, path: string, force = fa
 async function synchronizeDirectoryTreePath(sessionId: string, path: string) {
   const treeState = ensureSftpDirectoryTreeState(directoryTreeStates, sessionId);
   const ancestors = selectDirectoryTreePath(treeState, path);
-  for (const ancestor of ancestors.slice(0, -1)) {
+  const ancestorsToLoad = ancestors.length === 1 ? ancestors : ancestors.slice(0, -1);
+  for (const ancestor of ancestorsToLoad) {
     const node = ensureDirectoryTreeNode(treeState, ancestor);
     node.expanded = true;
     if (!node.loaded && !node.loading) await loadDirectoryTreeNode(sessionId, ancestor);
@@ -769,7 +770,7 @@ async function toggleDirectoryTreeNode(path: string) {
   if (!sessionId) return;
   const treeState = ensureSftpDirectoryTreeState(directoryTreeStates, sessionId);
   const node = ensureDirectoryTreeNode(treeState, path);
-  if (node.expanded) {
+  if (node.expanded && node.loaded && !node.error) {
     node.expanded = false;
     return;
   }
@@ -786,7 +787,10 @@ async function openDirectoryTreePath(path: string) {
 
 function refreshDirectoryTreeNode(path: string) {
   const sessionId = activeSessionId.value;
-  if (sessionId) void loadDirectoryTreeNode(sessionId, path, true);
+  if (!sessionId) return;
+  const treeState = ensureSftpDirectoryTreeState(directoryTreeStates, sessionId);
+  ensureDirectoryTreeNode(treeState, path).expanded = true;
+  void loadDirectoryTreeNode(sessionId, path, true);
 }
 
 function beginSftpTreeResize(event: PointerEvent) {

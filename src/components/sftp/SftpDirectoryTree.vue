@@ -47,7 +47,7 @@ const refreshPath = computed(() => props.state.selectedPath || props.state.rootP
         :key="row.node.path"
         class="sftp-directory-tree-row"
         :class="{ selected: row.node.path === state.selectedPath, error: Boolean(row.node.error) }"
-        :style="{ '--tree-depth': row.depth }"
+        :style="{ paddingLeft: `${6 + row.depth * 16}px` }"
         role="treeitem"
         :aria-level="row.depth + 1"
         :aria-expanded="row.node.loaded && !row.node.children.length ? undefined : row.node.expanded"

@@ -165,7 +165,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #43a8e8; outline-
 .sftp-directory-tree-header .icon-button { width: 26px; height: 27px; color: #8ea2ac; }
 .sftp-directory-tree-header .icon-button:hover:not(:disabled) { color: #d9e6eb; background: #193641; }
 .sftp-directory-tree-scroll { min-height: 0; flex: 1; padding: 4px 0 8px; overflow: auto; scrollbar-width: thin; scrollbar-color: #35505d transparent; }
-.sftp-directory-tree-row { min-width: max-content; height: 28px; display: grid; grid-template-columns: 19px minmax(110px, 1fr) 20px; align-items: center; padding-left: calc(6px + (var(--tree-depth) * 16px)); color: #aebcc3; }
+.sftp-directory-tree-row { min-width: max-content; height: 28px; display: grid; grid-template-columns: 19px minmax(110px, 1fr) 20px; align-items: center; color: #aebcc3; }
 .sftp-directory-tree-row:hover { background: #132f3a; }
 .sftp-directory-tree-row.selected { color: #edf5f8; background: #183a49; box-shadow: inset 2px 0 #58b7fb; }
 .sftp-directory-tree-row.error { color: #e9a0a6; }
