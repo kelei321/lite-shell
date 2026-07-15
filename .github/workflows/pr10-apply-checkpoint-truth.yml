@@ -32,6 +32,16 @@ jobs:
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
           rustup default stable
 
+      - name: Fix patch path escaping
+        shell: pwsh
+        run: |
+          $path = "scripts/apply_pr10_checkpoint_truth.py"
+          $content = Get-Content $path -Raw
+          $old = 'source_path: format!("C:\\{id}.txt"),'
+          $new = 'source_path: format!("C:\\\\{id}.txt"),'
+          if (-not $content.Contains($old)) { throw "checkpoint test path pattern not found" }
+          Set-Content -Path $path -Value $content.Replace($old, $new) -Encoding utf8
+
       - name: Apply checkpoint truth patch
         shell: pwsh
         env:
