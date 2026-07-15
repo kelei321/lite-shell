@@ -13,9 +13,8 @@ use profiles::{
     profile_save, profiles_batch, profiles_list,
 };
 use sftp::{
-    sftp_cancel_transfer, sftp_create_directory, sftp_delete, sftp_delete_recursive,
-    sftp_delete_transfer_checkpoint, sftp_discard_transfer_checkpoint, sftp_download, sftp_list,
-    sftp_list_transfer_checkpoints, sftp_rename, sftp_upload, SftpTransferManager,
+    sftp_cancel_transfer, sftp_create_directory, sftp_delete, sftp_delete_recursive, sftp_list,
+    sftp_rename, SftpTransferManager,
 };
 use sftp_directory::{
     sftp_finish_directory_replacement, sftp_inspect_local_path, sftp_inspect_remote_path,
@@ -63,12 +62,7 @@ pub fn run() {
             connections_import_preview,
             connections_import_apply,
             sftp_list,
-            sftp_upload,
-            sftp_download,
             sftp_cancel_transfer,
-            sftp_list_transfer_checkpoints,
-            sftp_delete_transfer_checkpoint,
-            sftp_discard_transfer_checkpoint,
             sftp_queue_list,
             sftp_queue_enqueue,
             sftp_queue_pause,

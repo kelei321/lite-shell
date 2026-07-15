@@ -422,8 +422,10 @@ pub async fn sftp_queue_cancel(
         pending.state = QueueTaskState::Cancelled;
         pending.message = Some(if delete_partial {
             "任务已取消，断点已删除".to_owned()
-        } else {
+        } else if pending.checkpoint_available {
             "任务已取消，断点已保留".to_owned()
+        } else {
+            "任务已取消，尚未产生断点".to_owned()
         });
         pending.updated_at = unix_now();
         {
@@ -554,6 +556,7 @@ fn restore_store(
     for task in &mut store.tasks {
         task.version = QUEUE_VERSION;
         task.available_session_id = None;
+        task.checkpoint_available = false;
         if let Some(checkpoint) = checkpoint_by_task.get(task.task_id.as_str()) {
             task.transferred = checkpoint.transferred;
             task.total = checkpoint.source_size;
@@ -562,13 +565,15 @@ fn restore_store(
         }
         match task.state {
             QueueTaskState::Running | QueueTaskState::Pausing => {
-                task.state = if task.allow_pause {
+                task.state = if task.allow_pause && task.checkpoint_available {
                     QueueTaskState::Paused
                 } else {
                     QueueTaskState::Failed
                 };
-                task.message = Some(if task.allow_pause {
-                    "应用重启，任务已安全暂停".to_owned()
+                task.message = Some(if task.allow_pause && task.checkpoint_available {
+                    "应用重启，任务已从真实检查点安全暂停".to_owned()
+                } else if task.allow_pause {
+                    "应用重启时未找到可恢复断点，任务已标记失败".to_owned()
                 } else {
                     "目录批次因应用重启中断，请重新执行整个目录操作".to_owned()
                 });
@@ -816,11 +821,14 @@ async fn finish_worker_error(app: &AppHandle, task_id: &str, error: CommandError
             inner.tasks[index].clone(),
         )
     };
+    let has_checkpoint = checkpoint_exists(app, task_id).await;
     let discard_result = if action == Some(RequestedAction::CancelDelete) {
         Some(discard_checkpoint_if_present(app, &task_snapshot).await)
     } else {
         None
     };
+    let error_code = error.code;
+    let error_message = error.message;
     let task = {
         let mut inner = queue.inner.lock().await;
         let Ok(index) = task_index(&inner.tasks, task_id) else {
@@ -831,14 +839,24 @@ async fn finish_worker_error(app: &AppHandle, task_id: &str, error: CommandError
         inner.tasks[index].attempt_id = None;
         match action {
             Some(RequestedAction::Pause) => {
-                inner.tasks[index].state = QueueTaskState::Paused;
-                inner.tasks[index].checkpoint_available = true;
-                inner.tasks[index].message = Some("任务已安全暂停".to_owned());
+                inner.tasks[index].checkpoint_available = has_checkpoint;
+                if has_checkpoint {
+                    inner.tasks[index].state = QueueTaskState::Paused;
+                    inner.tasks[index].message = Some("任务已从真实检查点安全暂停".to_owned());
+                } else {
+                    inner.tasks[index].state = QueueTaskState::Failed;
+                    inner.tasks[index].message =
+                        Some(format!("无法安全暂停，未生成可恢复断点：{error_message}"));
+                }
             }
             Some(RequestedAction::CancelKeep) => {
                 inner.tasks[index].state = QueueTaskState::Cancelled;
-                inner.tasks[index].checkpoint_available = true;
-                inner.tasks[index].message = Some("任务已取消，断点已保留".to_owned());
+                inner.tasks[index].checkpoint_available = has_checkpoint;
+                inner.tasks[index].message = Some(if has_checkpoint {
+                    "任务已取消，断点已保留".to_owned()
+                } else {
+                    "任务已取消，尚未产生断点".to_owned()
+                });
             }
             Some(RequestedAction::CancelDelete) => match discard_result {
                 Some(Ok(())) => {
@@ -850,6 +868,7 @@ async fn finish_worker_error(app: &AppHandle, task_id: &str, error: CommandError
                 }
                 Some(Err(discard_error)) => {
                     inner.tasks[index].state = QueueTaskState::Failed;
+                    inner.tasks[index].checkpoint_available = has_checkpoint;
                     inner.tasks[index].message = Some(format!(
                         "任务已停止，但删除断点失败：{}",
                         discard_error.message
@@ -858,12 +877,13 @@ async fn finish_worker_error(app: &AppHandle, task_id: &str, error: CommandError
                 None => {}
             },
             None => {
-                inner.tasks[index].state = if error.code == "TRANSFER_CANCELLED" {
+                inner.tasks[index].state = if error_code == "TRANSFER_CANCELLED" {
                     QueueTaskState::Cancelled
                 } else {
                     QueueTaskState::Failed
                 };
-                inner.tasks[index].message = Some(error.message);
+                inner.tasks[index].checkpoint_available = has_checkpoint;
+                inner.tasks[index].message = Some(error_message);
             }
         }
         inner.tasks[index].speed_bytes_per_second = 0;
@@ -921,13 +941,19 @@ async fn apply_progress_event(app: &AppHandle, event: TransferEvent) {
     }
 }
 
+async fn checkpoint_exists(app: &AppHandle, task_id: &str) -> bool {
+    let Ok(root) = app.path().app_data_dir() else {
+        return false;
+    };
+    fs::metadata(root.join("transfers").join(format!("{task_id}.json")))
+        .await
+        .is_ok()
+}
+
 async fn discard_checkpoint_if_present(
     app: &AppHandle,
     task: &TransferQueueTask,
 ) -> Result<(), CommandError> {
-    if !task.checkpoint_available {
-        return Ok(());
-    }
     let session_id = if task.direction == QueueDirection::Upload {
         matching_session_id(&app.state::<SessionManager>(), &task.server_id).await
     } else {
@@ -1155,6 +1181,26 @@ mod tests {
         }
     }
 
+    fn checkpoint(id: &str, server: &str) -> TransferCheckpoint {
+        TransferCheckpoint {
+            version: 2,
+            task_id: id.to_owned(),
+            session_id: format!("session-{server}"),
+            server_id: server.to_owned(),
+            direction: "upload".to_owned(),
+            source_path: format!("C:\\{id}.txt"),
+            target_path: format!("/tmp/{id}.txt"),
+            source_size: 100,
+            source_modified_at: Some(1),
+            source_fingerprint: "fingerprint".to_owned(),
+            temporary_path: format!("/tmp/{id}.txt.liteshell-{id}.part"),
+            transferred: 42,
+            created_at: 1,
+            updated_at: 2,
+            available_session_id: None,
+        }
+    }
+
     fn runnable_ids(
         tasks: &[TransferQueueTask],
         available_servers: &HashSet<String>,
@@ -1214,11 +1260,24 @@ mod tests {
             ],
         };
         let mut restored = HashSet::new();
-        restore_store(&mut store, &[], &mut restored);
+        restore_store(&mut store, &[checkpoint("running", "a")], &mut restored);
         assert_eq!(store.tasks[0].state, QueueTaskState::Paused);
         assert_eq!(store.tasks[1].state, QueueTaskState::Queued);
         assert_eq!(store.tasks[2].state, QueueTaskState::Failed);
         assert!(restored.contains("queued"));
+    }
+
+    #[test]
+    fn restart_marks_running_without_checkpoint_failed() {
+        let mut store = QueueStore {
+            version: QUEUE_VERSION,
+            concurrency: 3,
+            tasks: vec![task("running", "a", QueueTaskState::Running, 1)],
+        };
+        let mut restored = HashSet::new();
+        restore_store(&mut store, &[], &mut restored);
+        assert_eq!(store.tasks[0].state, QueueTaskState::Failed);
+        assert!(!store.tasks[0].checkpoint_available);
     }
 
     #[test]
