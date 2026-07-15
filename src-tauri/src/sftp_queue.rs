@@ -34,15 +34,6 @@ pub enum QueueDirection {
     Download,
 }
 
-impl QueueDirection {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Upload => "upload",
-            Self::Download => "download",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueTaskState {
@@ -868,9 +859,7 @@ async fn finish_worker_error(app: &AppHandle, task_id: &str, error: CommandError
 }
 
 async fn progress_loop(app: AppHandle) {
-    let transfers = app.state::<SftpTransferManager>();
-    let mut receiver = transfers.subscribe();
-    drop(transfers);
+    let mut receiver = app.state::<SftpTransferManager>().subscribe();
     loop {
         let event = match receiver.recv().await {
             Ok(event) => event,
