@@ -1,0 +1,48 @@
+name: PR10 Clippy Diagnostic
+
+on:
+  pull_request:
+    types: [reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 10
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v5
+        with:
+          ref: feat/sftp-transfer-queue
+
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+
+      - name: Capture Clippy log
+        id: clippy
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious 2>&1 | Tee-Object -FilePath clippy-full.log
+          $code = $LASTEXITCODE
+          Get-Content clippy-full.log -Tail 240 | Set-Content clippy-tail.txt
+          exit $code
+
+      - name: Upload diagnostic log
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr10-clippy-tail
+          path: clippy-tail.txt
+          if-no-files-found: error
+
+      - name: Preserve diagnostic failure
+        if: steps.clippy.outcome == 'failure'
+        shell: pwsh
+        run: exit 1
