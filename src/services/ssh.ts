@@ -188,6 +188,7 @@ export type TransferQueueSnapshot = {
 
 export type DirectoryConflictStrategy = "merge" | "skip" | "rename" | "replace";
 export type LocalPathKind = "missing" | "file" | "directory" | "symlink" | "other";
+export type LocalPathInspection = { kind: LocalPathKind; size?: number };
 
 export type DirectoryPrepareResult = {
   path: string;
@@ -318,7 +319,7 @@ export const getRemoteDirectoryManifest = (sessionId: string, path: string, scan
   invoke<RemoteDirectoryManifest>("sftp_remote_directory_manifest", { sessionId, path, scanId });
 
 export const inspectLocalPath = (path: string) =>
-  invoke<{ kind: LocalPathKind }>("sftp_inspect_local_path", { path });
+  invoke<LocalPathInspection>("sftp_inspect_local_path", { path });
 
 export const inspectRemotePath = (sessionId: string, path: string) =>
   invoke<{ kind: LocalPathKind }>("sftp_inspect_remote_path", { sessionId, path });

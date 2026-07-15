@@ -62,6 +62,13 @@ import {
 } from "./sftp/session-state";
 import { useSftpTransferQueue } from "./sftp/transfer-queue";
 import {
+  buildRemoteBreadcrumbs,
+  isPointInsideRect,
+  reconcileSelection,
+  selectionsMatchSnapshot,
+  updateSelectionPaths,
+} from "./sftp/navigation-state";
+import {
   IconAdjustmentsHorizontal,
   IconArrowDown,
   IconArrowLeft,
@@ -156,6 +163,28 @@ const sftpSearch = ref("");
 const sftpSortKey = ref<"name" | "size" | "modifiedAt">("name");
 const sftpSortAscending = ref(true);
 const sftpDragActive = ref(false);
+const sftpPaneElement = ref<HTMLElement | null>(null);
+const sftpPathInput = ref<HTMLInputElement | null>(null);
+const sftpPathEditing = ref(false);
+const sftpPathDraft = ref("");
+const sftpContextMenu = ref<{ x: number; y: number; sessionId: string; entryPath: string } | null>(null);
+const fileDoubleClickAction = ref<"select" | "download">(
+  localStorage.getItem("liteshell.sftp.file-double-click.v1") === "download" ? "download" : "select",
+);
+type DroppedDirectoryPreview = { path: string; manifest: LocalDirectoryManifest };
+type SftpDropPreview = {
+  sessionId: string;
+  serverLabel: string;
+  targetPath: string;
+  files: string[];
+  directories: DroppedDirectoryPreview[];
+  fileCount: number;
+  directoryCount: number;
+  totalSize: number;
+  skippedCount: number;
+};
+const sftpDropPreview = ref<SftpDropPreview | null>(null);
+const sftpDropBusy = ref(false);
 type ConflictKind = "file" | "directory";
 type ConflictValue = ConflictStrategy | DirectoryConflictStrategy;
 type ConflictResolution = { strategy: ConflictValue | "cancel"; applyAll: boolean };
@@ -223,9 +252,31 @@ const networkScale = computed(() => Math.max(1024, ...networkRxHistory.value, ..
 const activeSession = computed(() => sessions.value.find((session) => session.id === activeSessionId.value));
 const selectedRemoteFile = computed(() => selectedRemoteFiles.value.length === 1 ? selectedRemoteFiles.value[0] : null);
 const starred = computed(() => sftpBookmarks.value.includes(sftpPath.value));
+const sftpBreadcrumbs = computed(() => buildRemoteBreadcrumbs(sftpPath.value));
+const showHiddenFiles = computed({
+  get: () => activeSftpState.value.showHiddenFiles,
+  set: (value: boolean) => {
+    const state = activeSftpState.value;
+    state.showHiddenFiles = value;
+    if (!value) {
+      state.selectedEntries = state.selectedEntries.filter((entry) => !entry.name.startsWith("."));
+      if (state.selectionAnchorPath && !state.selectedEntries.some((entry) => entry.path === state.selectionAnchorPath)) {
+        state.selectionAnchorPath = state.selectedEntries.at(-1)?.path;
+      }
+    }
+  },
+});
+const currentDirectoryTotalSize = computed(() => sftpEntries.value
+  .filter((entry) => entry.kind === "file")
+  .reduce((total, entry) => total + entry.size, 0));
+const runningTransferCount = computed(() => visibleTransfers.value
+  .filter((task) => task.state === "running" || task.state === "pausing").length);
 const displayedSftpEntries = computed(() => {
   const term = sftpSearch.value.trim().toLocaleLowerCase();
-  const entries = sftpEntries.value.filter((entry) => !term || entry.name.toLocaleLowerCase().includes(term));
+  const entries = sftpEntries.value.filter((entry) => {
+    if (!showHiddenFiles.value && entry.name.startsWith(".")) return false;
+    return !term || entry.name.toLocaleLowerCase().includes(term);
+  });
   return [...entries].sort((left, right) => {
     if (left.kind === "directory" && right.kind !== "directory") return -1;
     if (left.kind !== "directory" && right.kind === "directory") return 1;
@@ -654,12 +705,21 @@ async function loadDirectory(sessionId: string, path: string, recordHistory = tr
     return;
   }
 
-  const requestVersion = beginSftpDirectoryRequest(state);
+  const preserveSelection = !recordHistory && path === state.path;
+  const previousSelection = preserveSelection ? [...state.selectedEntries] : [];
+  const requestVersion = beginSftpDirectoryRequest(state, preserveSelection);
   try {
     const listing = await listSftpDirectory(sessionId, path);
     if (!isCurrentSftpDirectoryRequest(sftpStates, state, requestVersion)) return;
     state.path = listing.path;
-    state.entries = bindSftpEntries(sessionId, listing.entries);
+    const entries = bindSftpEntries(sessionId, listing.entries);
+    state.entries = entries;
+    if (preserveSelection) {
+      state.selectedEntries = reconcileSelection(entries, previousSelection);
+      if (state.selectionAnchorPath && !entries.some((entry) => entry.path === state.selectionAnchorPath)) {
+        state.selectionAnchorPath = state.selectedEntries.at(-1)?.path;
+      }
+    }
     if (recordHistory && state.history[state.historyIndex] !== listing.path) {
       state.history = state.history.slice(0, state.historyIndex + 1);
       state.history.push(listing.path);
@@ -676,9 +736,9 @@ async function loadDirectory(sessionId: string, path: string, recordHistory = tr
   }
 }
 
-function loadActiveDirectory(path: string, recordHistory = true) {
+async function loadActiveDirectory(path: string, recordHistory = true) {
   const sessionId = activeSessionId.value;
-  if (sessionId) void loadDirectory(sessionId, path, recordHistory);
+  if (sessionId) await loadDirectory(sessionId, path, recordHistory);
 }
 
 function navigateHistory(offset: number) {
@@ -697,23 +757,54 @@ function parentPath(path: string) {
   return normalized.slice(0, normalized.lastIndexOf("/")) || "/";
 }
 
-function openSftpEntry(entry: SessionSftpEntry) {
+async function beginPathEditing() {
+  sftpPathDraft.value = sftpPath.value;
+  sftpPathEditing.value = true;
+  await nextTick();
+  sftpPathInput.value?.focus();
+  sftpPathInput.value?.select();
+}
+
+function cancelPathEditing() {
+  sftpPathDraft.value = sftpPath.value;
+  sftpPathEditing.value = false;
+}
+
+async function submitPathEditing() {
+  const path = sftpPathDraft.value.trim();
+  if (!path) return;
+  sftpPathEditing.value = false;
+  await loadActiveDirectory(path);
+  sftpPathDraft.value = sftpPath.value;
+}
+
+async function openSftpEntry(entry: SessionSftpEntry) {
   const state = sftpStates.get(entry.sessionId);
   if (!state || activeSessionId.value !== entry.sessionId) return;
   state.selectedEntries = [entry];
-  if (entry.kind === "directory") void loadDirectory(entry.sessionId, entry.path);
+  state.selectionAnchorPath = entry.path;
+  if (entry.kind === "directory") await loadDirectory(entry.sessionId, entry.path);
+  else if (entry.kind === "file" && fileDoubleClickAction.value === "download") await startDownload();
 }
 
 function selectRemoteEntry(entry: SessionSftpEntry, event: MouseEvent) {
   const state = sftpStates.get(entry.sessionId);
   if (!state || activeSessionId.value !== entry.sessionId) return;
-  if (event.ctrlKey || event.metaKey) {
-    state.selectedEntries = state.selectedEntries.some((item) => item.path === entry.path)
-      ? state.selectedEntries.filter((item) => item.path !== entry.path)
-      : [...state.selectedEntries, entry];
-  } else {
-    state.selectedEntries = [entry];
-  }
+  const entries = displayedSftpEntries.value;
+  const update = updateSelectionPaths(
+    entries.map((item) => item.path),
+    state.selectedEntries.map((item) => item.path),
+    entry.path,
+    state.selectionAnchorPath,
+    {
+      toggle: event.ctrlKey || event.metaKey,
+      range: event.shiftKey,
+      additiveRange: event.shiftKey && (event.ctrlKey || event.metaKey),
+    },
+  );
+  const selectedPaths = new Set(update.paths);
+  state.selectedEntries = entries.filter((item) => selectedPaths.has(item.path));
+  state.selectionAnchorPath = update.anchorPath;
 }
 
 function joinRemotePath(directory: string, name: string) {
@@ -876,9 +967,9 @@ async function uploadDirectoryPath(
   sessionId = activeSessionId.value,
   conflicts = createConflictBatchContext(),
   allowDirectoryAll = false,
-) {
+): Promise<boolean> {
   const session = sessions.value.find((item) => item.id === sessionId);
-  if (!session?.connected) return;
+  if (!session?.connected) return false;
   const state = ensureSftpSessionState(sftpStates, sessionId);
   const targetDirectory = state.path;
   let prepared: DirectoryPrepareResult | undefined;
@@ -889,12 +980,13 @@ async function uploadDirectoryPath(
     const rootInspection = await inspectRemotePath(sessionId, requestedRoot);
     if (rootInspection.kind === "file" || rootInspection.kind === "symlink" || rootInspection.kind === "other") {
       state.error = `目标“${manifest.rootName}”已存在同名文件、链接或不支持的条目`;
-      return;
+      return false;
     }
     let directoryStrategy: DirectoryConflictStrategy = "merge";
     if (rootInspection.kind === "directory") {
       const choice = await chooseDirectoryConflict(manifest.rootName, conflicts, allowDirectoryAll);
-      if (choice === "cancel" || choice === "skip") return;
+      if (choice === "cancel") return false;
+      if (choice === "skip") return true;
       directoryStrategy = choice;
     }
     prepared = await prepareRemoteDirectory(
@@ -903,7 +995,7 @@ async function uploadDirectoryPath(
       directoryStrategy,
       directoryStrategy === "replace" ? crypto.randomUUID() : undefined,
     );
-    if (prepared.skipped) return;
+    if (prepared.skipped) return true;
 
     for (const directory of manifest.directories) {
       await prepareRemoteDirectory(sessionId, joinRemotePath(prepared.path, directory), "merge");
@@ -921,7 +1013,7 @@ async function uploadDirectoryPath(
         if (choice === "cancel") {
           await finishPreparedDirectory(prepared, false, sessionId);
           prepared = undefined;
-          return;
+          return false;
         }
         conflictStrategy = choice;
         if (choice === "skip") continue;
@@ -938,16 +1030,18 @@ async function uploadDirectoryPath(
     await finishPreparedDirectory(prepared, true, sessionId);
     prepared = undefined;
     await loadDirectory(sessionId, state.path, false);
+    return true;
   } catch (error) {
     if (prepared?.replacementId) {
       try {
         await finishPreparedDirectory(prepared, false, sessionId);
       } catch (rollbackError) {
         state.error = `${describeCommandError(error)}；自动恢复原目录失败：${describeCommandError(rollbackError)}`;
-        return;
+        return false;
       }
     }
     state.error = describeCommandError(error);
+    return false;
   }
 }
 
@@ -1238,43 +1332,90 @@ async function renameRemoteEntry() {
   }
 }
 
-async function deleteRemoteEntry() {
-  const selected = selectedRemoteFile.value;
-  if (!selected) return;
-  const sessionId = selected.sessionId;
-  const session = sessions.value.find((item) => item.id === sessionId);
+async function deleteRemoteEntries() {
+  const sessionId = activeSessionId.value;
   const state = sftpStates.get(sessionId);
-  if (!session?.connected || !state || activeSessionId.value !== sessionId) return;
-  const confirmed = await ask(`确定删除“${selected.name}”吗？此操作无法撤销。`, {
-    title: selected.kind === "directory" ? "删除远程目录" : "删除远程文件",
-    kind: "warning",
-    okLabel: "删除",
-    cancelLabel: "取消",
-  });
-  if (!confirmed) return;
-  if (selected.kind === "directory") {
-    const recursiveConfirmed = await ask(`目录“${selected.name}”中的所有文件和子目录都将被永久删除。请再次确认。`, {
-      title: "确认递归删除",
+  const session = sessions.value.find((item) => item.id === sessionId);
+  const selected = state ? [...state.selectedEntries] : [];
+  if (!state || !session?.connected || !selectionBelongsToSession(selected, sessionId) || !selected.length) return;
+
+  const directoryCount = selected.filter((entry) => entry.kind === "directory").length;
+  const fileCount = selected.length - directoryCount;
+  const summary = [
+    fileCount ? `${fileCount} 个文件或链接` : "",
+    directoryCount ? `${directoryCount} 个目录` : "",
+  ].filter(Boolean).join("、");
+  const confirmed = await ask(
+    `确定永久删除已选择的 ${summary} 吗？${directoryCount ? "目录将连同所有子目录和文件递归删除。" : ""}此操作无法撤销。`,
+    {
+      title: "批量删除远程项目",
       kind: "warning",
-      okLabel: "永久删除目录",
+      okLabel: `删除 ${selected.length} 项`,
       cancelLabel: "取消",
-    });
-    if (!recursiveConfirmed) return;
-  }
-  if (activeSessionId.value !== sessionId || !state.selectedEntries.some((entry) => entry.path === selected.path)) {
+    },
+  );
+  if (!confirmed) return;
+
+  const currentPaths = state.selectedEntries.map((entry) => entry.path);
+  const selectedPaths = selected.map((entry) => entry.path);
+  if (activeSessionId.value !== sessionId || !selectionsMatchSnapshot(currentPaths, selectedPaths)) {
     state.error = "会话或选择已经变化，删除已取消";
     return;
   }
-  try {
-    if (selected.kind === "directory") {
-      await deleteSftpDirectoryRecursive(sessionId, selected.path);
-    } else {
-      await deleteSftpEntry(sessionId, selected.path, false);
+
+  const failures: string[] = [];
+  let deleted = 0;
+  for (const entry of selected) {
+    try {
+      if (entry.kind === "directory") await deleteSftpDirectoryRecursive(sessionId, entry.path);
+      else await deleteSftpEntry(sessionId, entry.path, false);
+      deleted += 1;
+    } catch (error) {
+      failures.push(`${entry.name}：${describeCommandError(error)}`);
     }
-    await loadDirectory(sessionId, state.path, false);
-  } catch (error) {
-    state.error = describeCommandError(error);
   }
+  await loadDirectory(sessionId, state.path, false);
+  state.notice = `已删除 ${deleted} 项${failures.length ? `，${failures.length} 项失败` : ""}`;
+  if (failures.length) state.error = failures.slice(0, 3).join("；");
+}
+
+function openSftpContextMenu(entry: SessionSftpEntry, event: MouseEvent) {
+  const state = sftpStates.get(entry.sessionId);
+  if (!state || activeSessionId.value !== entry.sessionId) return;
+  if (!state.selectedEntries.some((item) => item.path === entry.path)) {
+    state.selectedEntries = [entry];
+    state.selectionAnchorPath = entry.path;
+  }
+  sftpContextMenu.value = {
+    x: Math.min(event.clientX, window.innerWidth - 190),
+    y: Math.min(event.clientY, window.innerHeight - 230),
+    sessionId: entry.sessionId,
+    entryPath: entry.path,
+  };
+}
+
+async function copySelectedRemotePaths() {
+  const state = sftpStates.get(activeSessionId.value);
+  if (!state?.selectedEntries.length) return;
+  try {
+    await navigator.clipboard.writeText(state.selectedEntries.map((entry) => entry.path).join("\n"));
+    state.notice = `已复制 ${state.selectedEntries.length} 个远程路径`;
+  } catch (error) {
+    state.error = `复制路径失败：${describeCommandError(error)}`;
+  }
+}
+
+async function runSftpContextAction(action: "download" | "rename" | "delete" | "copy" | "refresh") {
+  const menu = sftpContextMenu.value;
+  sftpContextMenu.value = null;
+  if (!menu || menu.sessionId !== activeSessionId.value) return;
+  const state = sftpStates.get(menu.sessionId);
+  if (!state?.selectedEntries.some((entry) => entry.path === menu.entryPath)) return;
+  if (action === "download") await startDownload();
+  else if (action === "rename") await renameRemoteEntry();
+  else if (action === "delete") await deleteRemoteEntries();
+  else if (action === "copy") await copySelectedRemotePaths();
+  else await loadDirectory(menu.sessionId, state.path, false);
 }
 
 function formatSize(size: number, kind: SftpEntry["kind"]) {
@@ -1373,28 +1514,99 @@ function formatEta(seconds?: number | null) {
   return `${Math.floor(seconds / 3600)} 小时 ${Math.ceil(seconds % 3600 / 60)} 分钟`;
 }
 
-async function handleDroppedPaths(paths: string[]) {
+function isSftpDropPosition(position: { x: number; y: number }) {
+  const pane = sftpPaneElement.value;
+  if (!pane) return false;
+  const scale = window.devicePixelRatio || 1;
+  return isPointInsideRect(
+    { x: position.x / scale, y: position.y / scale },
+    pane.getBoundingClientRect(),
+  );
+}
+
+async function prepareDroppedPaths(paths: string[]) {
   const session = activeSession.value;
   if (!session?.connected || !paths.length) return;
   const sessionId = session.id;
   const state = ensureSftpSessionState(sftpStates, sessionId);
-  const conflicts = createConflictBatchContext();
   selectedTool.value = "files";
+  state.error = "";
+
   const files: string[] = [];
-  for (const path of paths) {
-    try {
-      const manifest = await scanLocalDirectory(path, sessionId);
-      await uploadDirectoryPath(path, manifest, sessionId, conflicts, paths.length > 1);
-    } catch (error) {
-      if (commandErrorCode(error) === "LOCAL_DIRECTORY_INVALID") {
+  const directories: DroppedDirectoryPreview[] = [];
+  let fileCount = 0;
+  let directoryCount = 0;
+  let totalSize = 0;
+  let skippedCount = 0;
+  try {
+    for (const path of paths) {
+      const inspection = await inspectLocalPath(path);
+      if (inspection.kind === "file") {
         files.push(path);
-        continue;
+        fileCount += 1;
+        totalSize += inspection.size ?? 0;
+      } else if (inspection.kind === "directory") {
+        const manifest = await scanLocalDirectory(path, sessionId);
+        directories.push({ path, manifest });
+        fileCount += manifest.fileCount;
+        directoryCount += manifest.directoryCount + 1;
+        totalSize += manifest.totalSize;
+        skippedCount += manifest.skippedLinks + manifest.skippedUnsupported;
+      } else {
+        skippedCount += 1;
       }
-      state.error = describeCommandError(error);
-      return;
     }
+  } catch (error) {
+    state.error = describeCommandError(error);
+    return;
   }
-  if (files.length) await uploadFilePaths(files, sessionId, conflicts);
+  if (!files.length && !directories.length) {
+    state.error = "拖放内容中没有可上传的普通文件或目录";
+    return;
+  }
+  sftpDropPreview.value = {
+    sessionId,
+    serverLabel: session.name,
+    targetPath: state.path,
+    files,
+    directories,
+    fileCount,
+    directoryCount,
+    totalSize,
+    skippedCount,
+  };
+}
+
+async function confirmDroppedPaths() {
+  const preview = sftpDropPreview.value;
+  if (!preview || sftpDropBusy.value) return;
+  const session = sessions.value.find((item) => item.id === preview.sessionId);
+  const state = sftpStates.get(preview.sessionId);
+  if (!session?.connected || !state || activeSessionId.value !== preview.sessionId || state.path !== preview.targetPath) {
+    if (state) state.error = "会话或目标目录已经变化，请重新拖放文件";
+    sftpDropPreview.value = null;
+    return;
+  }
+
+  sftpDropBusy.value = true;
+  state.error = "";
+  const conflicts = createConflictBatchContext();
+  try {
+    for (const directory of preview.directories) {
+      const shouldContinue = await uploadDirectoryPath(
+        directory.path,
+        directory.manifest,
+        preview.sessionId,
+        conflicts,
+        preview.directories.length > 1,
+      );
+      if (!shouldContinue || state.error) return;
+    }
+    if (preview.files.length) await uploadFilePaths(preview.files, preview.sessionId, conflicts);
+  } finally {
+    sftpDropBusy.value = false;
+    sftpDropPreview.value = null;
+  }
 }
 
 function formatUptime(seconds = 0) {
@@ -1448,10 +1660,13 @@ onMounted(async () => {
     unlistenSsh = await listenSshEvents(handleSshEvent);
     unlistenSftp = await listenSftpQueueTasks(handleTransfer);
     unlistenDragDrop = await getCurrentWindow().onDragDropEvent((event) => {
-      if (event.payload.type === "over") sftpDragActive.value = Boolean(activeSession.value?.connected);
-      else if (event.payload.type === "drop") {
+      if (event.payload.type === "over") {
+        sftpDragActive.value = Boolean(activeSession.value?.connected)
+          && isSftpDropPosition(event.payload.position);
+      } else if (event.payload.type === "drop") {
+        const insideSftp = isSftpDropPosition(event.payload.position);
         sftpDragActive.value = false;
-        void handleDroppedPaths(event.payload.paths);
+        if (insideSftp) void prepareDroppedPaths(event.payload.paths);
       } else sftpDragActive.value = false;
     });
     profiles.value = await listProfiles().catch(() => []);
@@ -1459,7 +1674,14 @@ onMounted(async () => {
   }
 });
 
+watch(fileDoubleClickAction, (value) => {
+  localStorage.setItem("liteshell.sftp.file-double-click.v1", value);
+});
+
 watch(activeSessionId, (sessionId) => {
+  sftpContextMenu.value = null;
+  sftpPathEditing.value = false;
+  sftpPathDraft.value = sessionId ? ensureSftpSessionState(sftpStates, sessionId).path : "";
   renderActiveTerminal();
   if (sessionId) loadSftpStorage(sessionId);
   const session = sessions.value.find((item) => item.id === sessionId);
@@ -1486,7 +1708,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
+  <div class="app-shell" :class="{ 'sidebar-collapsed': sidebarCollapsed }" @click="sftpContextMenu = null">
     <header class="titlebar" data-tauri-drag-region>
       <div class="brand-mark"><IconServer :size="16" stroke-width="2.1" /></div>
       <strong>LiteShell</strong>
@@ -1565,7 +1787,7 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="sftp-pane">
+      <section ref="sftpPaneElement" class="sftp-pane">
         <div v-if="sftpDragActive" class="sftp-drop-overlay"><IconUpload :size="38" /><strong>上传到 {{ sftpPath }}</strong><span>松开鼠标上传文件或文件夹</span></div>
         <aside class="sftp-tools">
           <strong>SFTP</strong>
@@ -1576,14 +1798,21 @@ onBeforeUnmount(() => {
         <div class="file-browser">
           <div class="file-toolbar">
             <button class="icon-button" aria-label="后退" :disabled="sftpHistoryIndex <= 0" @click="navigateHistory(-1)"><IconArrowLeft :size="20" /></button><button class="icon-button" aria-label="前进" :disabled="sftpHistoryIndex >= sftpHistory.length - 1" @click="navigateHistory(1)"><IconArrowRight :size="20" /></button><button class="icon-button" aria-label="上一级" @click="loadActiveDirectory(parentPath(sftpPath))"><IconArrowUp :size="20" /></button><button class="icon-button" aria-label="刷新" :disabled="sftpLoading" @click="loadActiveDirectory(sftpPath, false)"><IconRefresh :size="19" /></button>
-            <div class="path-field"><input v-model="sftpPath" aria-label="远程路径" @keyup.enter="loadActiveDirectory(sftpPath)" /><button class="icon-button" aria-label="收藏路径" @click="toggleSftpBookmark"><component :is="starred ? IconStarFilled : IconStar" :size="20" /></button></div>
+            <div class="path-field">
+              <input v-if="sftpPathEditing" ref="sftpPathInput" v-model="sftpPathDraft" aria-label="编辑远程路径" @keyup.enter="submitPathEditing" @keyup.esc="cancelPathEditing" />
+              <nav v-else class="path-breadcrumbs" aria-label="远程路径面包屑"><button v-for="crumb in sftpBreadcrumbs" :key="crumb.path" @click="loadActiveDirectory(crumb.path)">{{ crumb.label }}</button></nav>
+              <button class="path-edit-button" :aria-label="sftpPathEditing ? '取消编辑路径' : '编辑远程路径'" @click="sftpPathEditing ? cancelPathEditing() : beginPathEditing()">{{ sftpPathEditing ? '取消' : '编辑' }}</button>
+              <button class="icon-button" aria-label="收藏路径" @click="toggleSftpBookmark"><component :is="starred ? IconStarFilled : IconStar" :size="20" /></button>
+            </div>
             <label class="sftp-search"><IconSearch :size="15" /><input v-model="sftpSearch" placeholder="筛选" /></label>
+            <label class="sftp-option"><input v-model="showHiddenFiles" type="checkbox" />显示隐藏文件</label>
+            <label class="sftp-option">双击文件<select v-model="fileDoubleClickAction"><option value="select">仅选择</option><option value="download">下载</option></select></label>
             <button class="toolbar-button" :disabled="!activeSession?.connected" @click="startUpload"><IconUpload :size="18" />上传文件</button>
             <button class="toolbar-button" :disabled="!activeSession?.connected" @click="startUploadDirectory"><IconFolder :size="17" />上传目录</button>
             <button class="toolbar-button" :disabled="!selectedRemoteFiles.length" @click="startDownload"><IconArrowDown :size="18" />下载{{ selectedRemoteFiles.length > 1 ? `（${selectedRemoteFiles.length}）` : '' }}</button>
             <button class="toolbar-button" :disabled="!activeSession?.connected" @click="createRemoteDirectory"><IconPlus :size="18" />新建目录</button>
             <button class="toolbar-button" :disabled="selectedRemoteFiles.length !== 1" @click="renameRemoteEntry">重命名</button>
-            <button class="toolbar-button danger" :disabled="selectedRemoteFiles.length !== 1" @click="deleteRemoteEntry"><IconTrash :size="16" />删除</button>
+            <button class="toolbar-button danger" :disabled="!selectedRemoteFiles.length" @click="deleteRemoteEntries"><IconTrash :size="16" />删除{{ selectedRemoteFiles.length > 1 ? `（${selectedRemoteFiles.length}）` : '' }}</button>
           </div>
           <div v-if="recursiveScan && recursiveScan.sessionId === activeSessionId" class="sftp-scan-status"><span>{{ recursiveScan.label }}…</span><button @click="cancelRecursiveScan">取消扫描</button></div>
           <div v-if="visibleTransfers.length" class="transfer-queue">
@@ -1615,18 +1844,18 @@ onBeforeUnmount(() => {
           <div v-if="sftpError" class="sftp-error">{{ sftpError }}</div>
           <div v-if="selectedTool === 'files'" class="file-table" role="table" aria-label="远程文件">
             <div class="file-row file-header" role="row"><button @click="changeSftpSort('name')">名称</button><button @click="changeSftpSort('size')">大小</button><button @click="changeSftpSort('modifiedAt')">修改时间</button><span>权限</span></div>
-            <button v-for="file in displayedSftpEntries" :key="file.path" class="file-row" :class="{ selected: selectedRemoteFiles.some(item => item.path === file.path) }" role="row" @click="selectRemoteEntry(file, $event)" @dblclick="openSftpEntry(file)"><span><component :is="file.kind === 'directory' ? IconFolder : IconFile" :size="21" :class="file.kind === 'directory' ? 'folder' : 'file'" />{{ file.name }}</span><span>{{ formatSize(file.size, file.kind) }}</span><span>{{ formatModified(file.modifiedAt) }}</span><span>{{ file.permissions }}</span></button>
+            <button v-for="file in displayedSftpEntries" :key="file.path" class="file-row" :class="{ selected: selectedRemoteFiles.some(item => item.path === file.path) }" role="row" @click="selectRemoteEntry(file, $event)" @dblclick="openSftpEntry(file)" @contextmenu.prevent="openSftpContextMenu(file, $event)"><span><component :is="file.kind === 'directory' ? IconFolder : IconFile" :size="21" :class="file.kind === 'directory' ? 'folder' : 'file'" />{{ file.name }}</span><span>{{ formatSize(file.size, file.kind) }}</span><span>{{ formatModified(file.modifiedAt) }}</span><span>{{ file.permissions }}</span></button>
             <div v-if="sftpLoading" class="sftp-loading">正在读取目录…</div>
             <div v-else-if="activeSession?.connected && !displayedSftpEntries.length && !sftpError" class="sftp-loading">{{ sftpSearch ? '没有匹配的文件' : '目录为空' }}</div>
           </div>
           <div v-else-if="selectedTool === 'bookmarks'" class="sftp-location-list"><header><strong>路径书签</strong><span>{{ sftpBookmarks.length }} 项</span></header><button v-for="path in sftpBookmarks" :key="path" @dblclick="selectedTool = 'files'; loadActiveDirectory(path)"><IconBookmark :size="17" /><span>{{ path }}</span><small>双击打开</small><IconX :size="15" @click.stop="removeSftpBookmark(path)" /></button><div v-if="!sftpBookmarks.length" class="empty-tool-state"><IconBookmark :size="34" /><strong>暂无书签</strong><span>在路径栏点击星标收藏常用目录</span></div></div>
           <div v-else class="sftp-location-list"><header><strong>访问历史</strong><button :disabled="!sftpRecentPaths.length" @click="clearSftpHistory">清空</button></header><button v-for="path in sftpRecentPaths" :key="path" @dblclick="selectedTool = 'files'; loadActiveDirectory(path)"><IconClockHour4 :size="17" /><span>{{ path }}</span><small>双击打开</small></button><div v-if="!sftpRecentPaths.length" class="empty-tool-state"><IconClockHour4 :size="34" /><strong>暂无历史记录</strong><span>浏览过的远程目录会显示在这里</span></div></div>
-          <footer class="file-summary">{{ sftpEntries.length }} 项<span v-if="selectedRemoteFiles.length"> · 已选择 {{ selectedRemoteFiles.length }} 项</span></footer>
+          <footer class="file-summary">{{ sftpEntries.length }} 项 · {{ formatSize(currentDirectoryTotalSize, 'file') }}<span v-if="selectedRemoteFiles.length"> · 已选择 {{ selectedRemoteFiles.length }} 项</span></footer>
         </div>
       </section>
     </main>
 
-    <footer class="statusbar"><span><i class="online-dot" :class="{ offline: !activeSession?.connected }"></i>{{ activeSession?.connected ? '已连接' : '未连接' }}</span><span class="latency">{{ systemMetrics ? `${systemMetrics.latencyMs} ms` : '--' }}</span><span>UTF-8</span><span>转发 0</span></footer>
+    <footer class="statusbar"><span><i class="online-dot" :class="{ offline: !activeSession?.connected }"></i>{{ activeSession?.connected ? '已连接' : '未连接' }}</span><span>SFTP {{ sftpEntries.length }} 项 / 已选 {{ selectedRemoteFiles.length }} / {{ formatSize(currentDirectoryTotalSize, 'file') }}</span><span>运行传输 {{ runningTransferCount }}</span><span class="latency">{{ systemMetrics ? `${systemMetrics.latencyMs} ms` : '--' }}</span><span>UTF-8</span></footer>
 
     <div v-if="showConnectDialog" class="dialog-backdrop" @click.self="showConnectDialog = false">
       <section class="connect-dialog" role="dialog" aria-modal="true" aria-labelledby="connect-title">
@@ -1653,6 +1882,20 @@ onBeforeUnmount(() => {
         </div>
         <p v-if="connectError" class="dialog-error">{{ connectError }}</p>
         <footer><button class="secondary-button" @click="showConnectDialog = false">取消</button><button v-if="pendingFingerprint" class="primary-button" :disabled="connectBusy" @click="confirmHostKey">信任并连接</button><button v-else class="primary-button" :disabled="connectBusy" @click="submitConnection()">{{ connectBusy ? '连接中…' : '连接' }}</button></footer>
+      </section>
+    </div>
+    <div v-if="sftpContextMenu" class="sftp-context-menu" :style="{ left: `${sftpContextMenu.x}px`, top: `${sftpContextMenu.y}px` }" @click.stop>
+      <button @click="runSftpContextAction('download')">下载所选项目</button>
+      <button :disabled="selectedRemoteFiles.length !== 1" @click="runSftpContextAction('rename')">重命名</button>
+      <button class="danger" @click="runSftpContextAction('delete')">删除所选项目</button>
+      <button @click="runSftpContextAction('copy')">复制远程路径</button>
+      <button @click="runSftpContextAction('refresh')">刷新当前目录</button>
+    </div>
+    <div v-if="sftpDropPreview" class="dialog-backdrop drop-preview-backdrop">
+      <section class="drop-preview-dialog" role="dialog" aria-modal="true" aria-label="确认拖放上传">
+        <header><strong>确认拖放上传</strong></header>
+        <dl><div><dt>服务器</dt><dd>{{ sftpDropPreview.serverLabel }}</dd></div><div><dt>目标目录</dt><dd>{{ sftpDropPreview.targetPath }}</dd></div><div><dt>文件</dt><dd>{{ sftpDropPreview.fileCount }} 个</dd></div><div><dt>目录</dt><dd>{{ sftpDropPreview.directoryCount }} 个</dd></div><div><dt>总大小</dt><dd>{{ formatSize(sftpDropPreview.totalSize, 'file') }}</dd></div><div v-if="sftpDropPreview.skippedCount"><dt>跳过</dt><dd>{{ sftpDropPreview.skippedCount }} 个链接或不支持项</dd></div></dl>
+        <footer><button class="secondary-button" :disabled="sftpDropBusy" @click="sftpDropPreview = null">取消</button><button class="primary-button" :disabled="sftpDropBusy" @click="confirmDroppedPaths">{{ sftpDropBusy ? '上传中…' : '开始上传' }}</button></footer>
       </section>
     </div>
     <ConnectionManager :open="showConnectionManager" @close="showConnectionManager = false" @changed="profiles = $event.profiles" @connect="connectManagedProfiles" />
