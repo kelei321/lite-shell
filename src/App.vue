@@ -65,6 +65,7 @@ import {
   buildRemoteBreadcrumbs,
   isPointInsideRect,
   reconcileSelection,
+  selectionsMatchSnapshot,
   updateSelectionPaths,
 } from "./sftp/navigation-state";
 import {
@@ -966,9 +967,9 @@ async function uploadDirectoryPath(
   sessionId = activeSessionId.value,
   conflicts = createConflictBatchContext(),
   allowDirectoryAll = false,
-) {
+): Promise<boolean> {
   const session = sessions.value.find((item) => item.id === sessionId);
-  if (!session?.connected) return;
+  if (!session?.connected) return false;
   const state = ensureSftpSessionState(sftpStates, sessionId);
   const targetDirectory = state.path;
   let prepared: DirectoryPrepareResult | undefined;
@@ -979,12 +980,13 @@ async function uploadDirectoryPath(
     const rootInspection = await inspectRemotePath(sessionId, requestedRoot);
     if (rootInspection.kind === "file" || rootInspection.kind === "symlink" || rootInspection.kind === "other") {
       state.error = `目标“${manifest.rootName}”已存在同名文件、链接或不支持的条目`;
-      return;
+      return false;
     }
     let directoryStrategy: DirectoryConflictStrategy = "merge";
     if (rootInspection.kind === "directory") {
       const choice = await chooseDirectoryConflict(manifest.rootName, conflicts, allowDirectoryAll);
-      if (choice === "cancel" || choice === "skip") return;
+      if (choice === "cancel") return false;
+      if (choice === "skip") return true;
       directoryStrategy = choice;
     }
     prepared = await prepareRemoteDirectory(
@@ -993,7 +995,7 @@ async function uploadDirectoryPath(
       directoryStrategy,
       directoryStrategy === "replace" ? crypto.randomUUID() : undefined,
     );
-    if (prepared.skipped) return;
+    if (prepared.skipped) return true;
 
     for (const directory of manifest.directories) {
       await prepareRemoteDirectory(sessionId, joinRemotePath(prepared.path, directory), "merge");
@@ -1011,7 +1013,7 @@ async function uploadDirectoryPath(
         if (choice === "cancel") {
           await finishPreparedDirectory(prepared, false, sessionId);
           prepared = undefined;
-          return;
+          return false;
         }
         conflictStrategy = choice;
         if (choice === "skip") continue;
@@ -1028,16 +1030,18 @@ async function uploadDirectoryPath(
     await finishPreparedDirectory(prepared, true, sessionId);
     prepared = undefined;
     await loadDirectory(sessionId, state.path, false);
+    return true;
   } catch (error) {
     if (prepared?.replacementId) {
       try {
         await finishPreparedDirectory(prepared, false, sessionId);
       } catch (rollbackError) {
         state.error = `${describeCommandError(error)}；自动恢复原目录失败：${describeCommandError(rollbackError)}`;
-        return;
+        return false;
       }
     }
     state.error = describeCommandError(error);
+    return false;
   }
 }
 
@@ -1352,8 +1356,9 @@ async function deleteRemoteEntries() {
   );
   if (!confirmed) return;
 
-  const currentPaths = new Set(state.selectedEntries.map((entry) => entry.path));
-  if (activeSessionId.value !== sessionId || selected.some((entry) => !currentPaths.has(entry.path))) {
+  const currentPaths = state.selectedEntries.map((entry) => entry.path);
+  const selectedPaths = selected.map((entry) => entry.path);
+  if (activeSessionId.value !== sessionId || !selectionsMatchSnapshot(currentPaths, selectedPaths)) {
     state.error = "会话或选择已经变化，删除已取消";
     return;
   }
@@ -1544,7 +1549,7 @@ async function prepareDroppedPaths(paths: string[]) {
         const manifest = await scanLocalDirectory(path, sessionId);
         directories.push({ path, manifest });
         fileCount += manifest.fileCount;
-        directoryCount += Math.max(1, manifest.directoryCount);
+        directoryCount += manifest.directoryCount + 1;
         totalSize += manifest.totalSize;
         skippedCount += manifest.skippedLinks + manifest.skippedUnsupported;
       } else {
@@ -1588,14 +1593,14 @@ async function confirmDroppedPaths() {
   const conflicts = createConflictBatchContext();
   try {
     for (const directory of preview.directories) {
-      await uploadDirectoryPath(
+      const shouldContinue = await uploadDirectoryPath(
         directory.path,
         directory.manifest,
         preview.sessionId,
         conflicts,
         preview.directories.length > 1,
       );
-      if (state.error) return;
+      if (!shouldContinue || state.error) return;
     }
     if (preview.files.length) await uploadFilePaths(preview.files, preview.sessionId, conflicts);
   } finally {
@@ -1800,7 +1805,7 @@ onBeforeUnmount(() => {
               <button class="icon-button" aria-label="收藏路径" @click="toggleSftpBookmark"><component :is="starred ? IconStarFilled : IconStar" :size="20" /></button>
             </div>
             <label class="sftp-search"><IconSearch :size="15" /><input v-model="sftpSearch" placeholder="筛选" /></label>
-            <label class="sftp-option"><input v-model="showHiddenFiles" type="checkbox" />隐藏文件</label>
+            <label class="sftp-option"><input v-model="showHiddenFiles" type="checkbox" />显示隐藏文件</label>
             <label class="sftp-option">双击文件<select v-model="fileDoubleClickAction"><option value="select">仅选择</option><option value="download">下载</option></select></label>
             <button class="toolbar-button" :disabled="!activeSession?.connected" @click="startUpload"><IconUpload :size="18" />上传文件</button>
             <button class="toolbar-button" :disabled="!activeSession?.connected" @click="startUploadDirectory"><IconFolder :size="17" />上传目录</button>
