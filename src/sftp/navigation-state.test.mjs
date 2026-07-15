@@ -5,6 +5,7 @@ import {
   isPointInsideRect,
   normalizeRemotePath,
   reconcileSelection,
+  selectionsMatchSnapshot,
   updateSelectionPaths,
 } from "./navigation-state.ts";
 
@@ -33,6 +34,12 @@ test("reconciles a selection against refreshed entries", () => {
   const result = reconcileSelection(refreshed, previous);
   assert.deepEqual(result.map((item) => item.path), ["/a.txt"]);
   assert.equal(result[0], refreshed[0]);
+});
+
+test("requires an exact selection snapshot before destructive actions", () => {
+  assert.equal(selectionsMatchSnapshot(["/a", "/b"], ["/b", "/a"]), true);
+  assert.equal(selectionsMatchSnapshot(["/a", "/b", "/c"], ["/a", "/b"]), false);
+  assert.equal(selectionsMatchSnapshot(["/a"], ["/a", "/b"]), false);
 });
 
 test("supports contiguous shift ranges and additive ranges", () => {
