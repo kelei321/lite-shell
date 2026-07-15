@@ -219,6 +219,21 @@ export function selectDirectoryTreePath(
     const current = ancestors[index];
     const parent = index > 0 ? ancestors[index - 1] : null;
     const node = ensureDirectoryTreeNode(state, current, parent);
+    if (parent !== null) {
+      const parentNode = ensureDirectoryTreeNode(
+        state,
+        parent,
+        index > 1 ? ancestors[index - 2] : null,
+      );
+      if (!parentNode.children.includes(node.path)) {
+        parentNode.children.push(node.path);
+        parentNode.children.sort((left, right) => {
+          const leftName = state.nodes.get(left)?.name.toLowerCase() ?? left.toLowerCase();
+          const rightName = state.nodes.get(right)?.name.toLowerCase() ?? right.toLowerCase();
+          return leftName.localeCompare(rightName);
+        });
+      }
+    }
     if (index < ancestors.length - 1) node.expanded = true;
   }
   return ancestors;

@@ -60,6 +60,25 @@ test("selects canonical ancestor paths and expands parents", () => {
   assert.equal(state.nodes.get("/home/test/project").expanded, false);
 });
 
+test("keeps a selected path visible when its loaded parent cache is stale", () => {
+  const state = createSftpDirectoryTreeState("session-a");
+  let version = beginDirectoryTreeRequest(state, "/");
+  applyDirectoryTreeListing(state, "/", version, "/", [directory("home", "/home")]);
+
+  version = beginDirectoryTreeRequest(state, "/home");
+  applyDirectoryTreeListing(state, "/home", version, "/home", [directory("zeta", "/home/zeta")]);
+  state.nodes.get("/home").expanded = true;
+
+  selectDirectoryTreePath(state, "/home/alpha");
+  assert.deepEqual(state.nodes.get("/home").children, ["/home/alpha", "/home/zeta"]);
+  assert.deepEqual(visibleDirectoryTreeNodes(state).map(({ node }) => node.path), [
+    "/",
+    "/home",
+    "/home/alpha",
+    "/home/zeta",
+  ]);
+});
+
 test("flattens only expanded nodes and reports node errors", () => {
   const state = createSftpDirectoryTreeState("session-a");
   const version = beginDirectoryTreeRequest(state, "/");
