@@ -1,0 +1,92 @@
+name: PR12 Apply Directory Tree
+
+on:
+  pull_request:
+    types: [opened, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'feat/sftp-directory-tree'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v5
+        with:
+          ref: feat/sftp-directory-tree
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+
+      - name: Validate integration script
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -B -m py_compile scripts/apply_sftp_directory_tree.py
+
+      - name: Apply directory tree integration
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -B scripts/apply_sftp_directory_tree.py
+
+      - name: Format Rust
+        shell: pwsh
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate frontend
+        shell: pwsh
+        run: |
+          npm run test:frontend
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate Rust
+        shell: pwsh
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D clippy::correctness -D clippy::suspicious
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Remove temporary files
+        shell: pwsh
+        run: |
+          Remove-Item scripts/apply_sftp_directory_tree.py -Force
+          Remove-Item .github/workflows/pr12-apply-directory-tree.yml -Force
+
+      - name: Commit and push
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Output "No changes to commit"
+            exit 0
+          }
+          git commit -m "feat: add lazy SFTP directory tree"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git push origin HEAD:feat/sftp-directory-tree
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
