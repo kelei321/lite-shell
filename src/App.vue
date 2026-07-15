@@ -6,6 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import "@xterm/xterm/css/xterm.css";
 import ConnectionManager from "./components/ConnectionManager.vue";
+import SftpDirectoryTree from "./components/sftp/SftpDirectoryTree.vue";
 import {
   cancelSftpTransfer,
   commandErrorCode,
@@ -25,6 +26,7 @@ import {
   inspectRemotePath,
   isTauri,
   listProfiles,
+  listSftpDirectories,
   listSftpDirectory,
   prepareLocalDirectory,
   prepareRemoteDirectory,
@@ -62,6 +64,17 @@ import {
 } from "./sftp/session-state";
 import { useSftpTransferQueue } from "./sftp/transfer-queue";
 import {
+  applyDirectoryTreeListing,
+  beginDirectoryTreeRequest,
+  ensureDirectoryTreeNode,
+  ensureSftpDirectoryTreeState,
+  failDirectoryTreeRequest,
+  finishDirectoryTreeRequest,
+  removeSftpDirectoryTreeState,
+  selectDirectoryTreePath,
+  type SftpDirectoryTreeState,
+} from "./sftp/directory-tree-state";
+import {
   buildRemoteBreadcrumbs,
   isPointInsideRect,
   reconcileSelection,
@@ -77,6 +90,7 @@ import {
   IconBookmark,
   IconChevronDown,
   IconChevronLeft,
+  IconChevronRight,
   IconChevronUp,
   IconClockHour4,
   IconFile,
@@ -103,6 +117,16 @@ const search = ref("");
 const statusExpanded = ref(true);
 const sidebarCollapsed = ref(false);
 const selectedTool = ref<"files" | "bookmarks" | "history">("files");
+const directoryTreeStates = reactive(new Map<string, SftpDirectoryTreeState>());
+const emptyDirectoryTreeState = reactive(ensureSftpDirectoryTreeState(new Map(), ""));
+const activeDirectoryTreeState = computed(() => activeSessionId.value
+  ? ensureSftpDirectoryTreeState(directoryTreeStates, activeSessionId.value)
+  : emptyDirectoryTreeState);
+const storedSftpTreeWidth = Number(localStorage.getItem("liteshell.sftp.tree-width.v1"));
+const sftpTreeWidth = ref(Number.isFinite(storedSftpTreeWidth)
+  ? Math.min(420, Math.max(160, storedSftpTreeWidth))
+  : 224);
+const sftpTreeCollapsed = ref(false);
 const sftpStates = reactive(new Map<string, SftpSessionState>());
 const emptySftpState = reactive(createSftpSessionState(""));
 const activeSftpState = computed(() => activeSessionId.value
@@ -236,6 +260,7 @@ let terminalResizeObserver: ResizeObserver | null = null;
 let unlistenSsh: (() => void) | null = null;
 let unlistenSftp: (() => void) | null = null;
 let unlistenDragDrop: (() => void) | null = null;
+let stopSftpTreeResize: (() => void) | null = null;
 let monitorTimer: number | null = null;
 const terminalBuffers = new Map<string, string>();
 const textDecoder = new TextDecoder();
@@ -472,6 +497,7 @@ async function closeSession(id: string) {
   sessions.value = sessions.value.filter((session) => session.id !== id);
   terminalBuffers.delete(id);
   removeSftpSessionState(sftpStates, id);
+  removeSftpDirectoryTreeState(directoryTreeStates, id);
   if (isTauri()) await disconnectSsh(id).catch(() => undefined);
   if (activeSessionId.value === id) {
     activeSessionId.value = sessions.value[Math.max(0, index - 1)]?.id ?? "";
@@ -695,6 +721,94 @@ function renderActiveTerminal() {
   fitAddon?.fit();
 }
 
+async function loadDirectoryTreeNode(sessionId: string, path: string, force = false) {
+  const session = sessions.value.find((item) => item.id === sessionId);
+  const treeState = ensureSftpDirectoryTreeState(directoryTreeStates, sessionId);
+  const node = ensureDirectoryTreeNode(treeState, path);
+  if (!session?.connected || !isTauri()) {
+    node.loading = false;
+    node.error = "请先建立 SSH 连接";
+    return;
+  }
+  if (node.loaded && !force && !node.error) return;
+
+  const requestVersion = beginDirectoryTreeRequest(treeState, node.path);
+  try {
+    const listing = await listSftpDirectories(sessionId, node.path);
+    applyDirectoryTreeListing(
+      treeState,
+      node.path,
+      requestVersion,
+      listing.path,
+      listing.directories,
+    );
+  } catch (error) {
+    failDirectoryTreeRequest(
+      treeState,
+      node.path,
+      requestVersion,
+      describeCommandError(error),
+    );
+  } finally {
+    finishDirectoryTreeRequest(treeState, node.path, requestVersion);
+  }
+}
+
+async function synchronizeDirectoryTreePath(sessionId: string, path: string) {
+  const treeState = ensureSftpDirectoryTreeState(directoryTreeStates, sessionId);
+  const ancestors = selectDirectoryTreePath(treeState, path);
+  for (const ancestor of ancestors.slice(0, -1)) {
+    const node = ensureDirectoryTreeNode(treeState, ancestor);
+    node.expanded = true;
+    if (!node.loaded && !node.loading) await loadDirectoryTreeNode(sessionId, ancestor);
+  }
+}
+
+async function toggleDirectoryTreeNode(path: string) {
+  const sessionId = activeSessionId.value;
+  if (!sessionId) return;
+  const treeState = ensureSftpDirectoryTreeState(directoryTreeStates, sessionId);
+  const node = ensureDirectoryTreeNode(treeState, path);
+  if (node.expanded) {
+    node.expanded = false;
+    return;
+  }
+  node.expanded = true;
+  if (!node.loaded || node.error) await loadDirectoryTreeNode(sessionId, path);
+}
+
+async function openDirectoryTreePath(path: string) {
+  const sessionId = activeSessionId.value;
+  if (!sessionId) return;
+  selectedTool.value = "files";
+  await loadDirectory(sessionId, path);
+}
+
+function refreshDirectoryTreeNode(path: string) {
+  const sessionId = activeSessionId.value;
+  if (sessionId) void loadDirectoryTreeNode(sessionId, path, true);
+}
+
+function beginSftpTreeResize(event: PointerEvent) {
+  if (sftpTreeCollapsed.value) return;
+  event.preventDefault();
+  stopSftpTreeResize?.();
+  const startX = event.clientX;
+  const startWidth = sftpTreeWidth.value;
+  const handleMove = (moveEvent: PointerEvent) => {
+    sftpTreeWidth.value = Math.min(420, Math.max(160, startWidth + moveEvent.clientX - startX));
+  };
+  const handleStop = () => {
+    window.removeEventListener("pointermove", handleMove);
+    window.removeEventListener("pointerup", handleStop);
+    localStorage.setItem("liteshell.sftp.tree-width.v1", String(sftpTreeWidth.value));
+    stopSftpTreeResize = null;
+  };
+  stopSftpTreeResize = handleStop;
+  window.addEventListener("pointermove", handleMove);
+  window.addEventListener("pointerup", handleStop, { once: true });
+}
+
 async function loadDirectory(sessionId: string, path: string, recordHistory = true) {
   const session = sessions.value.find((item) => item.id === sessionId);
   const state = ensureSftpSessionState(sftpStates, sessionId);
@@ -727,6 +841,7 @@ async function loadDirectory(sessionId: string, path: string, recordHistory = tr
       state.recentPaths = [listing.path, ...state.recentPaths.filter((item) => item !== listing.path)].slice(0, 50);
       writeSftpStorage(sessionId, "liteshell.sftp.history.v1", state.recentPaths);
     }
+    void synchronizeDirectoryTreePath(sessionId, listing.path);
   } catch (error) {
     if (isCurrentSftpDirectoryRequest(sftpStates, state, requestVersion)) {
       state.error = describeCommandError(error);
@@ -1703,6 +1818,7 @@ onBeforeUnmount(() => {
   unlistenSsh?.();
   unlistenSftp?.();
   unlistenDragDrop?.();
+  stopSftpTreeResize?.();
   if (monitorTimer !== null) window.clearInterval(monitorTimer);
 });
 </script>
@@ -1787,14 +1903,40 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section ref="sftpPaneElement" class="sftp-pane">
+      <section
+        ref="sftpPaneElement"
+        class="sftp-pane"
+        :style="{ '--sftp-tree-width': `${sftpTreeCollapsed ? 0 : sftpTreeWidth}px` }"
+      >
         <div v-if="sftpDragActive" class="sftp-drop-overlay"><IconUpload :size="38" /><strong>上传到 {{ sftpPath }}</strong><span>松开鼠标上传文件或文件夹</span></div>
-        <aside class="sftp-tools">
-          <strong>SFTP</strong>
-          <button :class="{ active: selectedTool === 'files' }" @click="selectedTool = 'files'"><IconFolder :size="24" /><span>文件</span></button>
-          <button :class="{ active: selectedTool === 'bookmarks' }" @click="selectedTool = 'bookmarks'"><IconStar :size="25" /><span>书签</span></button>
-          <button :class="{ active: selectedTool === 'history' }" @click="selectedTool = 'history'"><IconClockHour4 :size="25" /><span>历史</span></button>
+        <aside class="sftp-tree-pane" :class="{ collapsed: sftpTreeCollapsed }">
+          <div class="sftp-tree-tabs">
+            <button :class="{ active: selectedTool === 'files' }" @click="selectedTool = 'files'"><IconFolder :size="15" />目录</button>
+            <button :class="{ active: selectedTool === 'bookmarks' }" @click="selectedTool = 'bookmarks'"><IconStar :size="15" />书签</button>
+            <button :class="{ active: selectedTool === 'history' }" @click="selectedTool = 'history'"><IconClockHour4 :size="15" />历史</button>
+            <button class="sftp-tree-collapse icon-button" aria-label="折叠目录树" @click="sftpTreeCollapsed = true"><IconChevronLeft :size="16" /></button>
+          </div>
+          <SftpDirectoryTree
+            v-if="selectedTool === 'files'"
+            :state="activeDirectoryTreeState"
+            :connected="Boolean(activeSession?.connected)"
+            @open="openDirectoryTreePath"
+            @toggle="toggleDirectoryTreeNode"
+            @refresh="refreshDirectoryTreeNode"
+          />
+          <div v-else-if="selectedTool === 'bookmarks'" class="sftp-tree-location-list">
+            <header><strong>路径书签</strong><span>{{ sftpBookmarks.length }} 项</span></header>
+            <button v-for="path in sftpBookmarks" :key="path" @dblclick="selectedTool = 'files'; loadActiveDirectory(path)"><IconBookmark :size="15" /><span>{{ path }}</span><IconX :size="14" @click.stop="removeSftpBookmark(path)" /></button>
+            <div v-if="!sftpBookmarks.length" class="sftp-directory-tree-empty"><IconBookmark :size="28" /><strong>暂无书签</strong><span>在地址栏收藏常用目录</span></div>
+          </div>
+          <div v-else class="sftp-tree-location-list">
+            <header><strong>访问历史</strong><button :disabled="!sftpRecentPaths.length" @click="clearSftpHistory">清空</button></header>
+            <button v-for="path in sftpRecentPaths" :key="path" @dblclick="selectedTool = 'files'; loadActiveDirectory(path)"><IconClockHour4 :size="15" /><span>{{ path }}</span></button>
+            <div v-if="!sftpRecentPaths.length" class="sftp-directory-tree-empty"><IconClockHour4 :size="28" /><strong>暂无历史</strong><span>浏览过的远程目录会显示在这里</span></div>
+          </div>
         </aside>
+        <div class="sftp-tree-resizer" role="separator" aria-orientation="vertical" @pointerdown="beginSftpTreeResize"></div>
+        <button v-if="sftpTreeCollapsed" class="sftp-tree-expand icon-button" aria-label="展开目录树" @click="sftpTreeCollapsed = false"><IconChevronRight :size="17" /></button>
         <div class="file-browser">
           <div class="file-toolbar">
             <button class="icon-button" aria-label="后退" :disabled="sftpHistoryIndex <= 0" @click="navigateHistory(-1)"><IconArrowLeft :size="20" /></button><button class="icon-button" aria-label="前进" :disabled="sftpHistoryIndex >= sftpHistory.length - 1" @click="navigateHistory(1)"><IconArrowRight :size="20" /></button><button class="icon-button" aria-label="上一级" @click="loadActiveDirectory(parentPath(sftpPath))"><IconArrowUp :size="20" /></button><button class="icon-button" aria-label="刷新" :disabled="sftpLoading" @click="loadActiveDirectory(sftpPath, false)"><IconRefresh :size="19" /></button>
@@ -1842,14 +1984,12 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="activeSftpState.notice" class="sftp-notice">{{ activeSftpState.notice }}</div>
           <div v-if="sftpError" class="sftp-error">{{ sftpError }}</div>
-          <div v-if="selectedTool === 'files'" class="file-table" role="table" aria-label="远程文件">
+          <div class="file-table" role="table" aria-label="远程文件">
             <div class="file-row file-header" role="row"><button @click="changeSftpSort('name')">名称</button><button @click="changeSftpSort('size')">大小</button><button @click="changeSftpSort('modifiedAt')">修改时间</button><span>权限</span></div>
             <button v-for="file in displayedSftpEntries" :key="file.path" class="file-row" :class="{ selected: selectedRemoteFiles.some(item => item.path === file.path) }" role="row" @click="selectRemoteEntry(file, $event)" @dblclick="openSftpEntry(file)" @contextmenu.prevent="openSftpContextMenu(file, $event)"><span><component :is="file.kind === 'directory' ? IconFolder : IconFile" :size="21" :class="file.kind === 'directory' ? 'folder' : 'file'" />{{ file.name }}</span><span>{{ formatSize(file.size, file.kind) }}</span><span>{{ formatModified(file.modifiedAt) }}</span><span>{{ file.permissions }}</span></button>
             <div v-if="sftpLoading" class="sftp-loading">正在读取目录…</div>
             <div v-else-if="activeSession?.connected && !displayedSftpEntries.length && !sftpError" class="sftp-loading">{{ sftpSearch ? '没有匹配的文件' : '目录为空' }}</div>
           </div>
-          <div v-else-if="selectedTool === 'bookmarks'" class="sftp-location-list"><header><strong>路径书签</strong><span>{{ sftpBookmarks.length }} 项</span></header><button v-for="path in sftpBookmarks" :key="path" @dblclick="selectedTool = 'files'; loadActiveDirectory(path)"><IconBookmark :size="17" /><span>{{ path }}</span><small>双击打开</small><IconX :size="15" @click.stop="removeSftpBookmark(path)" /></button><div v-if="!sftpBookmarks.length" class="empty-tool-state"><IconBookmark :size="34" /><strong>暂无书签</strong><span>在路径栏点击星标收藏常用目录</span></div></div>
-          <div v-else class="sftp-location-list"><header><strong>访问历史</strong><button :disabled="!sftpRecentPaths.length" @click="clearSftpHistory">清空</button></header><button v-for="path in sftpRecentPaths" :key="path" @dblclick="selectedTool = 'files'; loadActiveDirectory(path)"><IconClockHour4 :size="17" /><span>{{ path }}</span><small>双击打开</small></button><div v-if="!sftpRecentPaths.length" class="empty-tool-state"><IconClockHour4 :size="34" /><strong>暂无历史记录</strong><span>浏览过的远程目录会显示在这里</span></div></div>
           <footer class="file-summary">{{ sftpEntries.length }} 项 · {{ formatSize(currentDirectoryTotalSize, 'file') }}<span v-if="selectedRemoteFiles.length"> · 已选择 {{ selectedRemoteFiles.length }} 项</span></footer>
         </div>
       </section>

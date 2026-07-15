@@ -123,6 +123,17 @@ export type DirectoryListing = {
   entries: SftpEntry[];
 };
 
+export type SftpDirectoryTreeEntry = {
+  name: string;
+  path: string;
+  permissions: string;
+};
+
+export type DirectoryTreeListing = {
+  path: string;
+  directories: SftpDirectoryTreeEntry[];
+};
+
 export type RecursiveScanSummary = {
   fileCount: number;
   directoryCount: number;
@@ -274,6 +285,9 @@ export const applyConnectionsImport = (source: ImportSource, path: string) =>
 
 export const listSftpDirectory = (sessionId: string, path: string) =>
   invoke<DirectoryListing>("sftp_list", { sessionId, path });
+
+export const listSftpDirectories = (sessionId: string, path: string) =>
+  invoke<DirectoryTreeListing>("sftp_list_directories", { sessionId, path });
 
 export const cancelSftpTransfer = (transferId: string) =>
   invoke<void>("sftp_cancel_transfer", { transferId });

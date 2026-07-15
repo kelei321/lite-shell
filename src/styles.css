@@ -147,12 +147,47 @@ button:focus-visible, input:focus-visible { outline: 2px solid #43a8e8; outline-
 .quick-saved strong { font-size: 11px; }.quick-saved small { color: #71858f; font-size: 9px; }
 .quick-more { margin-top: 10px; }
 
-.sftp-pane { position: relative; min-height: 0; display: grid; grid-template-columns: 72px minmax(0, 1fr); background: var(--sftp); }
-.sftp-tools { display: flex; flex-direction: column; border-right: 1px solid var(--line); }
-.sftp-tools > strong { height: 48px; display: grid; place-items: center; border-bottom: 1px solid var(--line); font-size: 16px; }
-.sftp-tools button { position: relative; min-height: 65px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 4px; border: 0; color: #9eafb8; background: transparent; font-size: 12px; cursor: pointer; }
-.sftp-tools button.active { color: #dce8ed; background: #17303d; }
-.sftp-tools button.active::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: #55b8f8; }
+.sftp-pane { position: relative; min-height: 0; display: grid; grid-template-columns: minmax(0, var(--sftp-tree-width, 224px)) 5px minmax(0, 1fr); background: var(--sftp); }
+.sftp-tree-pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: #0c202a; }
+.sftp-tree-pane.collapsed { visibility: hidden; pointer-events: none; }
+.sftp-tree-tabs { height: 39px; flex: none; display: flex; align-items: stretch; border-bottom: 1px solid var(--line); background: #102631; }
+.sftp-tree-tabs > button:not(.sftp-tree-collapse) { min-width: 0; flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 0 5px; border: 0; color: #8ea2ad; background: transparent; cursor: pointer; font-size: 10px; }
+.sftp-tree-tabs > button:not(.sftp-tree-collapse):hover { color: #d5e1e6; background: #17313d; }
+.sftp-tree-tabs > button.active { color: #e1edf2; background: #183441; box-shadow: inset 0 -2px #58b7fb; }
+.sftp-tree-collapse { width: 28px; flex: none; color: #8da1ab; border-left: 1px solid #2a414c; }
+.sftp-tree-collapse:hover { color: #dce7ec; background: #1a3541; }
+.sftp-tree-resizer { position: relative; z-index: 3; cursor: col-resize; background: #203641; }
+.sftp-tree-resizer:hover, .sftp-tree-resizer:active { background: #4d91b8; }
+.sftp-tree-expand { position: absolute; z-index: 6; left: 6px; top: 46px; width: 27px; height: 31px; color: #b9c8cf; background: #183441; border: 1px solid #385563; border-radius: 3px; }
+.sftp-directory-tree { min-height: 0; flex: 1; display: flex; flex-direction: column; }
+.sftp-directory-tree-header { height: 34px; flex: none; display: flex; align-items: center; padding: 0 7px 0 10px; color: #aebec5; border-bottom: 1px solid #263d48; font-size: 11px; }
+.sftp-directory-tree-header strong { margin-right: auto; font-weight: 600; }
+.sftp-directory-tree-header .icon-button { width: 26px; height: 27px; color: #8ea2ac; }
+.sftp-directory-tree-header .icon-button:hover:not(:disabled) { color: #d9e6eb; background: #193641; }
+.sftp-directory-tree-scroll { min-height: 0; flex: 1; padding: 4px 0 8px; overflow: auto; scrollbar-width: thin; scrollbar-color: #35505d transparent; }
+.sftp-directory-tree-row { min-width: max-content; height: 28px; display: grid; grid-template-columns: 19px minmax(110px, 1fr) 20px; align-items: center; padding-left: calc(6px + (var(--tree-depth) * 16px)); color: #aebcc3; }
+.sftp-directory-tree-row:hover { background: #132f3a; }
+.sftp-directory-tree-row.selected { color: #edf5f8; background: #183a49; box-shadow: inset 2px 0 #58b7fb; }
+.sftp-directory-tree-row.error { color: #e9a0a6; }
+.sftp-directory-tree-toggle, .sftp-directory-tree-error { width: 19px; height: 25px; display: grid; place-items: center; padding: 0; border: 0; color: #8097a2; background: transparent; cursor: pointer; }
+.sftp-directory-tree-toggle:disabled { opacity: .45; }
+.sftp-directory-tree-toggle-spacer { width: 19px; }
+.sftp-directory-tree-label { min-width: 0; height: 27px; display: flex; align-items: center; gap: 6px; padding: 0 5px 0 1px; border: 0; color: inherit; background: transparent; text-align: left; cursor: default; }
+.sftp-directory-tree-label svg { flex: none; color: #ffc84f; fill: #ffc84f; }
+.sftp-directory-tree-label span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sftp-directory-tree-loading { color: #66b9e8; animation: sftp-tree-spin .8s linear infinite; }
+.sftp-directory-tree-error { color: #ff8d95; }
+@keyframes sftp-tree-spin { to { transform: rotate(360deg); } }
+.sftp-directory-tree-empty { min-height: 0; flex: 1; display: grid; place-content: center; justify-items: center; gap: 7px; padding: 18px; color: #708690; text-align: center; }
+.sftp-directory-tree-empty strong { color: #abb9c0; font-size: 12px; }
+.sftp-directory-tree-empty span { font-size: 10px; line-height: 1.45; }
+.sftp-tree-location-list { min-height: 0; flex: 1; overflow: auto; }
+.sftp-tree-location-list > header { height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 9px; color: #93a6af; border-bottom: 1px solid #263d48; font-size: 10px; }
+.sftp-tree-location-list > header strong { margin-right: auto; }
+.sftp-tree-location-list > header button { border: 0; color: #78bfe8; background: transparent; cursor: pointer; }
+.sftp-tree-location-list > button { width: 100%; min-width: 0; height: 32px; display: grid; grid-template-columns: 20px minmax(0, 1fr) 20px; align-items: center; gap: 4px; padding: 0 7px; border: 0; border-bottom: 1px solid #203842; color: #aabac2; background: transparent; text-align: left; cursor: default; }
+.sftp-tree-location-list > button:hover { background: #15313d; }
+.sftp-tree-location-list > button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-browser { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .file-toolbar { min-width: 0; height: 49px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: thin; }
 .file-toolbar > .icon-button { width: 25px; height: 30px; color: #c1cdd3; }

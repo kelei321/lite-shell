@@ -14,7 +14,7 @@ use profiles::{
 };
 use sftp::{
     sftp_cancel_transfer, sftp_create_directory, sftp_delete, sftp_delete_recursive, sftp_list,
-    sftp_rename, SftpTransferManager,
+    sftp_list_directories, sftp_rename, SftpTransferManager,
 };
 use sftp_directory::{
     sftp_finish_directory_replacement, sftp_inspect_local_path, sftp_inspect_remote_path,
@@ -62,6 +62,7 @@ pub fn run() {
             connections_import_preview,
             connections_import_apply,
             sftp_list,
+            sftp_list_directories,
             sftp_cancel_transfer,
             sftp_queue_list,
             sftp_queue_enqueue,
