@@ -1,0 +1,188 @@
+/* PR2: compact SFTP path bar, grouped tools, and responsive file list. */
+.file-toolbar {
+  height: auto;
+  min-height: 49px;
+  flex-wrap: wrap;
+  align-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+  overflow: visible;
+}
+
+.file-toolbar > .icon-button {
+  flex: none;
+}
+
+.path-field {
+  min-width: 240px;
+  flex: 1 1 360px;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+
+.path-field:focus-within {
+  border-color: #58b7fb;
+  box-shadow: 0 0 0 2px rgba(88, 183, 251, .12);
+}
+
+.file-browser:has(> .sftp-error) .path-field {
+  border-color: #70434e;
+}
+
+.path-field input {
+  font-family: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+}
+
+.path-breadcrumbs {
+  gap: 0;
+  padding-right: 3px;
+}
+
+.path-breadcrumbs button {
+  position: relative;
+  padding: 0 6px;
+  border-radius: 2px;
+}
+
+.path-breadcrumbs button:first-child {
+  min-width: 25px;
+  padding-inline: 5px;
+  color: #d9e6eb;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-weight: 700;
+  text-align: center;
+}
+
+.path-breadcrumbs button + button::before {
+  content: ">";
+  margin-right: 8px;
+  color: #607884;
+}
+
+.path-edit-button::after {
+  content: "Ctrl+L";
+  margin-left: 5px;
+  padding: 1px 4px;
+  border: 1px solid #34515e;
+  border-radius: 2px;
+  color: #738b97;
+  font-size: 8px;
+  line-height: 1.2;
+}
+
+.path-field:has(input) .path-edit-button::after {
+  content: "Esc";
+}
+
+.file-toolbar > .sftp-search {
+  margin-left: 3px;
+}
+
+.file-toolbar > .sftp-option:first-of-type {
+  margin-left: 3px;
+  padding-left: 10px;
+  border-left: 1px solid #2d4652;
+}
+
+.file-toolbar > .sftp-option + .toolbar-button {
+  margin-left: 3px;
+  padding-left: 14px;
+  border-left-color: #46616d;
+}
+
+.file-table {
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.file-row {
+  min-width: 850px;
+  grid-template-columns:
+    minmax(240px, 1.2fr)
+    minmax(92px, .36fr)
+    minmax(120px, .5fr)
+    minmax(190px, .75fr)
+    minmax(140px, .5fr);
+}
+
+.file-row > :nth-child(1) { grid-column: 1; }
+.file-row::before {
+  grid-column: 2;
+  grid-row: 1;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  border-right: 1px solid #263d48;
+  color: #8fa3ad;
+  white-space: nowrap;
+}
+.file-row > :nth-child(2) { grid-column: 3; }
+.file-row > :nth-child(3) { grid-column: 4; }
+.file-row > :nth-child(4) { grid-column: 5; }
+.file-header::before { content: "类型"; }
+button.file-row:has(svg.folder)::before { content: "文件夹"; }
+button.file-row:has(svg.file)::before { content: "文件 / 链接"; }
+
+.file-header {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  box-shadow: 0 1px #263d48;
+}
+
+@media (max-width: 1380px) {
+  .file-toolbar {
+    align-items: center;
+  }
+
+  .path-field {
+    flex-basis: calc(100% - 150px);
+  }
+
+  .file-toolbar > .sftp-search {
+    margin-left: 0;
+  }
+
+  .file-row {
+    min-width: 760px;
+    grid-template-columns:
+      minmax(220px, 1.2fr)
+      minmax(84px, .36fr)
+      minmax(110px, .5fr)
+      minmax(180px, .75fr)
+      minmax(130px, .5fr);
+  }
+}
+
+@media (max-width: 1120px) {
+  .file-toolbar {
+    max-height: 96px;
+    overflow-y: auto;
+    scrollbar-width: thin;
+  }
+
+  .path-field {
+    min-width: 210px;
+  }
+
+  .path-edit-button::after {
+    display: none;
+  }
+
+  .file-toolbar > .sftp-option:first-of-type,
+  .file-toolbar > .sftp-option + .toolbar-button {
+    margin-left: 0;
+    padding-left: 8px;
+  }
+
+  .file-row {
+    min-width: 690px;
+    grid-template-columns:
+      minmax(210px, 1.2fr)
+      82px
+      100px
+      170px
+      120px;
+  }
+}
