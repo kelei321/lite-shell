@@ -1,7 +1,7 @@
 # LiteShell SFTP 修改计划
 
 更新时间：2026-07-16  
-状态：原九阶段改造已完成；双栏文件管理 PR1 已合并，用户已确认继续 PR2；PR2 当前进行中
+状态：原九阶段改造已完成；双栏文件管理 PR1 已合并；PR2 已完成实现并通过初始 CI，当前待验证
 执行原则：先修复数据安全和一致性问题，再完善传输可靠性，最后扩展交互功能。
 
 ## 1. 文档定位
@@ -954,7 +954,7 @@ cancelled
 ## 17. SFTP 双栏文件管理改造
 
 更新时间：2026-07-16  
-当前状态：PR1 已合并并完成本地验证门禁；用户已确认继续 PR2，PR2 当前在分支 `feat/sftp-path-toolbar-polish` 实现和验证。
+当前状态：PR1 已合并并完成本地验证门禁；PR2 已完成实现，PR #14 初始 CI 已通过，当前等待最终文档 head 的 CI、code review 和合并。
 
 执行顺序：
 
@@ -1008,9 +1008,11 @@ cancelled
 
 ### 17.2 PR2：地址栏、工具栏和文件列表优化
 
-状态：`进行中`
+状态：`待验证`
 
 分支：`feat/sftp-path-toolbar-polish`
+
+PR：#14 `feat: polish SFTP path toolbar and file list`
 
 计划范围：
 
@@ -1034,7 +1036,8 @@ cancelled
 验证结果：
 
 - `node --experimental-strip-types --test src/sftp/path-toolbar-shortcuts.test.mjs`：3 项通过（Node.js 22.16.0）。
-- 完整 `npm run validate`：当前环境未执行，等待 GitHub Actions 覆盖前端类型检查、全部前端测试、生产构建和 Rust 基线。
+- GitHub Actions CI run `29467177443`：Frontend 与 Rust job 全部通过，包括 Vue/TypeScript 类型检查、Vite 生产构建、前端纯状态测试、Rust 格式、Rust 单元测试和 Clippy correctness/suspicious。
+- `npm run validate`：未在当前环境作为单条命令执行；其组成检查已由上述 CI 覆盖。
 - 未连接真实 SSH/SFTP 服务器，未执行任何远程写入测试。
 
 PR 前本地/桌面验收：
@@ -1047,4 +1050,4 @@ PR 前本地/桌面验收：
 - 文件列表类型列、sticky 表头、横向/纵向独立滚动正常。
 - 双会话切换、中文、空格、超长路径、大量文件和高延迟服务器。
 
-下一步：完成 `main...branch` 范围检查、创建 PR、code review 和 CI；全部通过后 squash merge，再进入完整 SFTP 实机验收。
+下一步：等待最终文档 head 的 `main...branch` 范围检查、GitHub Actions、code review；全部通过后 squash merge，再进入完整 SFTP 实机验收。
