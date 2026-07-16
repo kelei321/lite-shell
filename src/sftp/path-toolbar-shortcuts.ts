@@ -28,6 +28,9 @@ export function registerSftpPathShortcuts(
     if (!isSftpPathShortcut(event)) return;
     if (!root.querySelector(".file-browser")) return;
 
+    const eventTarget = event.target instanceof Element ? event.target : null;
+    if (eventTarget?.closest(".terminal-host, .dialog-backdrop")) return;
+
     event.preventDefault();
     event.stopPropagation();
     if (focusPathInput()) return;
