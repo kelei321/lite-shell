@@ -18,7 +18,10 @@ use tokio::{
     sync::{broadcast, Mutex as AsyncMutex, Semaphore},
 };
 
-use crate::ssh::{matching_session_id, open_sftp, session_server_id, CommandError, SessionManager};
+use crate::{
+    atomic_file::atomic_write,
+    ssh::{matching_session_id, open_sftp, session_server_id, CommandError, SessionManager},
+};
 
 pub struct SftpTransferManager {
     cancelled: AsyncMutex<HashSet<String>>,
@@ -1376,38 +1379,14 @@ async fn persist_transfer_checkpoint(
     checkpoint: &TransferCheckpoint,
 ) -> Result<(), CommandError> {
     let path = checkpoint_path(app, &checkpoint.task_id)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await.map_err(|error| {
-            CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string())
-        })?;
-    }
-    let temporary = path.with_extension("json.tmp");
     let mut persisted = checkpoint.clone();
     persisted.updated_at = unix_now();
     let content = serde_json::to_vec_pretty(&persisted).map_err(|error| {
         CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string())
     })?;
-    fs::write(&temporary, content).await.map_err(|error| {
-        CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string())
-    })?;
-    if let Err(error) = fs::rename(&temporary, &path).await {
-        if fs::metadata(&path).await.is_ok() {
-            fs::remove_file(&path).await.map_err(|remove_error| {
-                CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", remove_error.to_string())
-            })?;
-            fs::rename(&temporary, &path)
-                .await
-                .map_err(|rename_error| {
-                    CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", rename_error.to_string())
-                })?;
-        } else {
-            return Err(CommandError::new(
-                "TRANSFER_CHECKPOINT_WRITE_FAILED",
-                error.to_string(),
-            ));
-        }
-    }
-    Ok(())
+    atomic_write(&path, &content)
+        .await
+        .map_err(|error| CommandError::new("TRANSFER_CHECKPOINT_WRITE_FAILED", error.to_string()))
 }
 
 async fn load_transfer_checkpoint(

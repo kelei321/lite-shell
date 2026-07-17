@@ -209,7 +209,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #43a8e8; outline-
 .toolbar-button:hover { background: #23404d; }
 .toolbar-button.danger:not(:disabled) { color: #ffb0b5; }
 .toolbar-button.danger:hover:not(:disabled) { background: #412832; border-color: #70434e; }
-.transfer-queue { max-height: 218px; flex: none; overflow: auto; border-bottom: 1px solid #2c4450; }
+.transfer-queue, .directory-batch-queue { max-height: 218px; flex: none; overflow: auto; border-bottom: 1px solid #2c4450; }
+.directory-batch-queue { max-height: 176px; }
 .transfer-queue-heading { position: sticky; z-index: 2; top: 0; height: 30px; display: flex; align-items: center; gap: 12px; padding: 0 12px; color: #91a4ae; background: #102632; font-size: 11px; }
 .transfer-queue-heading > span { margin-right: auto; }
 .transfer-queue-heading button { border: 0; color: #8ea1aa; background: transparent; cursor: pointer; font-size: 10px; }
@@ -234,6 +235,22 @@ button:focus-visible, input:focus-visible { outline: 2px solid #43a8e8; outline-
 .upload-strip > button { border: 0; color: #79bfe8; background: transparent; cursor: pointer; font-size: 10px; white-space: nowrap; }
 .upload-strip > button:hover { color: #b8e2f8; }
 .upload-strip > button.danger-button { color: #ff9ca4; }
+.directory-batch-strip { min-width: 980px; min-height: 54px; display: grid; grid-template-columns: minmax(250px, 1.35fr) minmax(90px, .65fr) minmax(105px, .55fr) 92px; grid-auto-flow: column; grid-auto-columns: max-content; align-items: center; gap: 10px; padding: 5px 12px; color: #aebcc3; background: #122b37; border-bottom: 1px solid #2c4450; font-size: 11px; }
+.directory-batch-strip > span:first-child { min-width: 0; display: grid; gap: 2px; overflow: hidden; }
+.directory-batch-strip small { overflow: hidden; color: #8199a5; text-overflow: ellipsis; white-space: nowrap; }
+.directory-batch-strip small:last-child:not(:first-of-type) { color: #ef9aa1; }
+.directory-batch-strip > div { height: 4px; background: #263e49; }
+.directory-batch-strip > div i { display: block; height: 100%; background: #50afe7; }
+.directory-batch-strip > strong { color: #89b6ce; font-weight: 500; white-space: nowrap; }
+.directory-batch-strip.committing > strong { color: #7fcdf3; }
+.directory-batch-strip.completed > div i { background: #66c97b; }
+.directory-batch-strip.completed > strong { color: var(--green); }
+.directory-batch-strip.paused > strong { color: #f0bd68; }
+.directory-batch-strip.failed > strong, .directory-batch-strip.rollback_required > strong { color: #ff949c; }
+.directory-batch-strip.cancelled > strong { color: #a5b1b7; }
+.directory-batch-strip > button { border: 0; color: #79bfe8; background: transparent; cursor: pointer; font-size: 10px; white-space: nowrap; }
+.directory-batch-strip > button:hover { color: #b8e2f8; }
+.directory-batch-strip > button.danger-button { color: #ff9ca4; }
 .sftp-scan-status, .sftp-notice { padding: 7px 12px; border-bottom: 1px solid #345364; background: #172f3b; color: #9fd6f1; font-size: 11px; }
 .sftp-scan-status { display: flex; align-items: center; justify-content: space-between; }
 .sftp-scan-status button { border: 0; background: transparent; color: #79bfe8; cursor: pointer; }

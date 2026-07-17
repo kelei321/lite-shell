@@ -18,7 +18,6 @@ import {
   deleteProfile,
   describeCommandError,
   fetchSystemMetrics,
-  finishDirectoryReplacement,
   getLocalDirectoryManifest,
   getRemoteDirectoryManifest,
   disconnectSsh,
@@ -28,8 +27,7 @@ import {
   listProfiles,
   listSftpDirectories,
   listSftpDirectory,
-  prepareLocalDirectory,
-  prepareRemoteDirectory,
+  listenSftpDirectoryBatches,
   listenSftpQueueTasks,
   listenSshEvents,
   resizeSsh,
@@ -37,15 +35,16 @@ import {
   saveProfile,
   sendSshInput,
   wakeSftpTransferQueue,
+  wakeSftpDirectoryBatches,
   type ConnectionProfile,
   type ConflictStrategy,
   type DirectoryConflictStrategy,
-  type DirectoryPrepareResult,
   type LocalDirectoryManifest,
   type RecursiveScanSummary,
   type RemoteDirectoryManifest,
   type ConnectRequest,
   type SftpEntry,
+  type SftpDirectoryBatch,
   type SshEvent,
   type SystemMetrics,
   type TransferQueueTask,
@@ -63,6 +62,7 @@ import {
   type SftpSessionState,
 } from "./sftp/session-state";
 import { useSftpTransferQueue } from "./sftp/transfer-queue";
+import { useSftpDirectoryBatches } from "./sftp/directory-batches";
 import {
   applyDirectoryTreeListing,
   beginDirectoryTreeRequest,
@@ -166,6 +166,20 @@ const {
   clearFinishedTransfers: clearCompletedTransfers,
   changeTransferConcurrency,
 } = useSftpTransferQueue();
+const {
+  visibleBatches,
+  handleBatch: handleDirectoryBatch,
+  refreshBatches: refreshDirectoryBatches,
+  createBatch: createDirectoryBatch,
+  enqueueBatch: enqueueDirectoryBatch,
+  waitForBatch: waitForDirectoryBatch,
+  pauseBatch: pauseDirectoryBatch,
+  resumeBatch: resumeDirectoryBatch,
+  retryBatch: retryDirectoryBatch,
+  cancelBatch: cancelDirectoryBatch,
+  rollbackBatch: rollbackDirectoryBatch,
+  deleteBatch: deleteDirectoryBatch,
+} = useSftpDirectoryBatches();
 const recursiveScan = ref<{ id: string; sessionId: string; label: string } | null>(null);
 const sftpHistory = computed({
   get: () => activeSftpState.value.history,
@@ -259,6 +273,7 @@ let fitAddon: FitAddon | null = null;
 let terminalResizeObserver: ResizeObserver | null = null;
 let unlistenSsh: (() => void) | null = null;
 let unlistenSftp: (() => void) | null = null;
+let unlistenSftpBatches: (() => void) | null = null;
 let unlistenDragDrop: (() => void) | null = null;
 let stopSftpTreeResize: (() => void) | null = null;
 let monitorTimer: number | null = null;
@@ -296,6 +311,9 @@ const currentDirectoryTotalSize = computed(() => sftpEntries.value
   .reduce((total, entry) => total + entry.size, 0));
 const runningTransferCount = computed(() => visibleTransfers.value
   .filter((task) => task.state === "running" || task.state === "pausing").length);
+const visibleStandaloneTransfers = computed(() =>
+  visibleTransfers.value.filter((task) => !task.batchId),
+);
 const displayedSftpEntries = computed(() => {
   const term = sftpSearch.value.trim().toLocaleLowerCase();
   const entries = sftpEntries.value.filter((entry) => {
@@ -380,30 +398,6 @@ async function chooseDirectoryConflict(
   const strategy = result.strategy as DirectoryConflictStrategy;
   if (result.applyAll) context.directoryStrategy = strategy;
   return strategy;
-}
-
-async function finishPreparedDirectory(
-  prepared: DirectoryPrepareResult | undefined,
-  commit: boolean,
-  sessionId?: string,
-) {
-  if (!prepared?.replacementId) return;
-  await finishDirectoryReplacement(prepared.replacementId, commit, sessionId);
-}
-
-async function rollbackPreparedDirectory(
-  prepared: DirectoryPrepareResult | undefined,
-  sessionId: string | undefined,
-  cause: unknown,
-): Promise<never> {
-  if (prepared?.replacementId) {
-    try {
-      await finishPreparedDirectory(prepared, false, sessionId);
-    } catch (rollbackError) {
-      throw new Error(`${describeCommandError(cause)}；自动恢复原目录失败：${describeCommandError(rollbackError)}`);
-    }
-  }
-  throw cause;
 }
 
 function sftpStorageScope(sessionId: string) {
@@ -695,7 +689,9 @@ function handleSshEvent(event: SshEvent) {
   }
   if (["connected", "disconnected", "exit", "error"].includes(event.kind)) {
     void wakeSftpTransferQueue().catch(() => undefined);
+    void wakeSftpDirectoryBatches().catch(() => undefined);
     void refreshTransferQueue().catch(() => undefined);
+    void refreshDirectoryBatches().catch(() => undefined);
   }
   if (event.kind === "connected" && event.sessionId === activeSessionId.value) void refreshMetrics();
 
@@ -1091,7 +1087,7 @@ async function uploadDirectoryPath(
   if (!session?.connected) return false;
   const state = ensureSftpSessionState(sftpStates, sessionId);
   const targetDirectory = state.path;
-  let prepared: DirectoryPrepareResult | undefined;
+  let batch: SftpDirectoryBatch | undefined;
   try {
     const manifest = knownManifest ?? await scanLocalDirectory(localPath, sessionId);
     updateRecursiveScanNotice(state, manifest);
@@ -1108,20 +1104,25 @@ async function uploadDirectoryPath(
       if (choice === "skip") return true;
       directoryStrategy = choice;
     }
-    prepared = await prepareRemoteDirectory(
+    batch = await createDirectoryBatch({
       sessionId,
-      requestedRoot,
-      directoryStrategy,
-      directoryStrategy === "replace" ? crypto.randomUUID() : undefined,
-    );
-    if (prepared.skipped) return true;
+      serverLabel: transferServerLabel(sessionId),
+      direction: "upload",
+      sourceDirectory: localPath,
+      targetDirectory: requestedRoot,
+      conflictStrategy: directoryStrategy,
+      directories: manifest.directories,
+      fileCount: manifest.files.length,
+    });
+    if (batch.state === "completed") return true;
 
-    for (const directory of manifest.directories) {
-      await prepareRemoteDirectory(sessionId, joinRemotePath(prepared.path, directory), "merge");
-    }
-    const requests: FileQueueRequest[] = [];
+    const requests: Array<{
+      localPath: string;
+      remotePath: string;
+      conflictStrategy: ConflictStrategy;
+    }> = [];
     for (const file of manifest.files) {
-      const remotePath = joinRemotePath(prepared.path, file.relativePath);
+      const remotePath = joinRemotePath(batch.writeDirectory, file.relativePath);
       const inspection = await inspectRemotePath(sessionId, remotePath);
       if (inspection.kind === "directory" || inspection.kind === "symlink" || inspection.kind === "other") {
         throw new Error(`远程目标“${file.relativePath}”已存在同名目录、链接或不支持的条目`);
@@ -1130,32 +1131,28 @@ async function uploadDirectoryPath(
       if (inspection.kind === "file") {
         const choice = await chooseFileConflict(file.relativePath, conflicts, true);
         if (choice === "cancel") {
-          await finishPreparedDirectory(prepared, false, sessionId);
-          prepared = undefined;
+          await rollbackDirectoryBatch(batch);
           return false;
         }
         conflictStrategy = choice;
         if (choice === "skip") continue;
       }
       requests.push({
-        direction: "upload",
         localPath: file.absolutePath,
         remotePath,
         conflictStrategy,
-        allowPause: false,
       });
     }
-    await enqueueAndWaitFileTransfers(sessionId, requests);
-    await finishPreparedDirectory(prepared, true, sessionId);
-    prepared = undefined;
+    batch = await enqueueDirectoryBatch(batch.batchId, requests);
+    await waitForDirectoryBatch(batch.batchId);
     await loadDirectory(sessionId, state.path, false);
     return true;
   } catch (error) {
-    if (prepared?.replacementId) {
+    if (batch?.state === "preparing") {
       try {
-        await finishPreparedDirectory(prepared, false, sessionId);
+        await rollbackDirectoryBatch(batch);
       } catch (rollbackError) {
-        state.error = `${describeCommandError(error)}；自动恢复原目录失败：${describeCommandError(rollbackError)}`;
+        state.error = `${describeCommandError(error)}；批次回滚需要处理：${describeCommandError(rollbackError)}`;
         return false;
       }
     }
@@ -1184,21 +1181,28 @@ async function downloadDirectoryItem(
     if (choice === "skip") return true;
     directoryStrategy = choice;
   }
-  const prepared = await prepareLocalDirectory(
-    targetPath,
-    directoryStrategy,
-    directoryStrategy === "replace" ? crypto.randomUUID() : undefined,
-  );
-  if (prepared.skipped) return true;
+  let batch: SftpDirectoryBatch | undefined;
   try {
     const manifest = await scanRemoteDirectory(sessionId, item.path);
     updateRecursiveScanNotice(state, manifest);
-    for (const directory of manifest.directories) {
-      await prepareLocalDirectory(joinLocalPath(prepared.path, directory), "merge");
-    }
-    const requests: FileQueueRequest[] = [];
+    batch = await createDirectoryBatch({
+      sessionId,
+      serverLabel: transferServerLabel(sessionId),
+      direction: "download",
+      sourceDirectory: item.path,
+      targetDirectory: targetPath,
+      conflictStrategy: directoryStrategy,
+      directories: manifest.directories,
+      fileCount: manifest.files.length,
+    });
+    if (batch.state === "completed") return true;
+    const requests: Array<{
+      localPath: string;
+      remotePath: string;
+      conflictStrategy: ConflictStrategy;
+    }> = [];
     for (const file of manifest.files) {
-      const localPath = joinLocalPath(prepared.path, file.relativePath);
+      const localPath = joinLocalPath(batch.writeDirectory, file.relativePath);
       const inspection = await inspectLocalPath(localPath);
       if (inspection.kind === "directory" || inspection.kind === "symlink" || inspection.kind === "other") {
         throw new Error(`本地目标“${file.relativePath}”已存在同名目录、链接或不支持的条目`);
@@ -1207,25 +1211,30 @@ async function downloadDirectoryItem(
       if (inspection.kind === "file") {
         const choice = await chooseFileConflict(file.relativePath, conflicts, true);
         if (choice === "cancel") {
-          await finishPreparedDirectory(prepared, false);
+          await rollbackDirectoryBatch(batch);
           return false;
         }
         conflictStrategy = choice;
         if (choice === "skip") continue;
       }
       requests.push({
-        direction: "download",
         remotePath: file.remotePath,
         localPath,
         conflictStrategy,
-        allowPause: false,
       });
     }
-    await enqueueAndWaitFileTransfers(sessionId, requests);
-    await finishPreparedDirectory(prepared, true);
+    batch = await enqueueDirectoryBatch(batch.batchId, requests);
+    await waitForDirectoryBatch(batch.batchId);
     return true;
   } catch (error) {
-    await rollbackPreparedDirectory(prepared, undefined, error);
+    if (batch?.state === "preparing") {
+      try {
+        await rollbackDirectoryBatch(batch);
+      } catch (rollbackError) {
+        throw new Error(`${describeCommandError(error)}；批次回滚需要处理：${describeCommandError(rollbackError)}`);
+      }
+    }
+    throw error;
   }
 }
 
@@ -1320,6 +1329,80 @@ function handleTransfer(task: TransferQueueTask) {
     const state = sftpStates.get(task.sessionId);
     if (state) state.error = task.message ?? "文件传输失败";
   }
+}
+
+function handleDirectoryBatchEvent(batch: SftpDirectoryBatch) {
+  handleDirectoryBatch(batch);
+  if (["failed", "cancelled", "rollback_required"].includes(batch.state)) {
+    const state = batch.sessionId ? sftpStates.get(batch.sessionId) : undefined;
+    if (state && batch.lastError) state.error = batch.lastError;
+  }
+}
+
+function directoryBatchProgress(batch: SftpDirectoryBatch) {
+  if (!batch.fileCount) return batch.state === "completed" ? 100 : 0;
+  const finished = batch.completedCount + batch.failedCount + batch.cancelledCount;
+  return Math.min(100, Math.round((finished / batch.fileCount) * 100));
+}
+
+function directoryBatchStatusText(batch: SftpDirectoryBatch) {
+  if (batch.state === "preparing") return "正在准备";
+  if (batch.state === "queued") return batch.sessionId ? "排队中" : "等待服务器重连";
+  if (batch.state === "running") return `${directoryBatchProgress(batch)}%`;
+  if (batch.state === "paused") return "已暂停";
+  if (batch.state === "committing") return batch.lastError ? "等待服务器重连" : "正在提交目录";
+  if (batch.state === "completed") return "完成";
+  if (batch.state === "failed") return "失败";
+  if (batch.state === "cancelled") return "已取消";
+  return "需要恢复原目录";
+}
+
+function reportDirectoryBatchError(batch: SftpDirectoryBatch, error: unknown) {
+  const message = describeCommandError(error);
+  const state = batch.sessionId ? sftpStates.get(batch.sessionId) : undefined;
+  if (state) state.error = message;
+  else window.alert(message);
+}
+
+async function runDirectoryBatchAction(
+  batch: SftpDirectoryBatch,
+  action: (batch: SftpDirectoryBatch) => Promise<unknown>,
+) {
+  try {
+    await action(batch);
+  } catch (error) {
+    reportDirectoryBatchError(batch, error);
+  }
+}
+
+async function cancelDirectoryBatchTask(batch: SftpDirectoryBatch, deletePartial: boolean) {
+  if (deletePartial) {
+    const confirmed = await ask(
+      `确定取消目录批次“${batch.name}”并删除可安全删除的断点吗？目录替换批次随后仍需回滚 staging；合并批次不会删除无法证明归属的现有内容。`,
+      {
+        title: "取消目录批次",
+        kind: "warning",
+        okLabel: "取消并删除断点",
+        cancelLabel: "返回",
+      },
+    );
+    if (!confirmed) return;
+  }
+  await runDirectoryBatchAction(batch, (item) => cancelDirectoryBatch(item, deletePartial));
+}
+
+async function rollbackDirectoryBatchTask(batch: SftpDirectoryBatch) {
+  const confirmed = await ask(
+    `确定回滚目录批次“${batch.name}”吗？系统只会操作与该批次目标严格绑定的 staging 和 backup。`,
+    {
+      title: "恢复原目录",
+      kind: "warning",
+      okLabel: "执行回滚",
+      cancelLabel: "返回",
+    },
+  );
+  if (!confirmed) return;
+  await runDirectoryBatchAction(batch, rollbackDirectoryBatch);
 }
 
 function transferProgress(item: TransferQueueTask) {
@@ -1778,6 +1861,7 @@ onMounted(async () => {
   if (isTauri()) {
     unlistenSsh = await listenSshEvents(handleSshEvent);
     unlistenSftp = await listenSftpQueueTasks(handleTransfer);
+    unlistenSftpBatches = await listenSftpDirectoryBatches(handleDirectoryBatchEvent);
     unlistenDragDrop = await getCurrentWindow().onDragDropEvent((event) => {
       if (event.payload.type === "over") {
         sftpDragActive.value = Boolean(activeSession.value?.connected)
@@ -1790,6 +1874,7 @@ onMounted(async () => {
     });
     profiles.value = await listProfiles().catch(() => []);
     await refreshTransferQueue();
+    await refreshDirectoryBatches();
   }
 });
 
@@ -1821,6 +1906,7 @@ onBeforeUnmount(() => {
   terminal?.dispose();
   unlistenSsh?.();
   unlistenSftp?.();
+  unlistenSftpBatches?.();
   unlistenDragDrop?.();
   stopSftpTreeResize?.();
   if (monitorTimer !== null) window.clearInterval(monitorTimer);
@@ -1961,9 +2047,28 @@ onBeforeUnmount(() => {
             <button class="toolbar-button danger" :disabled="!selectedRemoteFiles.length" @click="deleteRemoteEntries"><IconTrash :size="16" />删除{{ selectedRemoteFiles.length > 1 ? `（${selectedRemoteFiles.length}）` : '' }}</button>
           </div>
           <div v-if="recursiveScan && recursiveScan.sessionId === activeSessionId" class="sftp-scan-status"><span>{{ recursiveScan.label }}…</span><button @click="cancelRecursiveScan">取消扫描</button></div>
-          <div v-if="visibleTransfers.length" class="transfer-queue">
+          <div v-if="visibleBatches.length" class="directory-batch-queue">
+            <div class="transfer-queue-heading"><span>目录批次（{{ visibleBatches.length }}）</span></div>
+            <div v-for="batch in visibleBatches" :key="batch.batchId" class="directory-batch-strip" :class="batch.state">
+              <span>{{ batch.direction === 'upload' ? '上传目录' : '下载目录' }} {{ batch.name }}
+                <small>{{ batch.serverLabel }} · {{ batch.sourceDirectory }} → {{ batch.targetDirectory }}</small>
+                <small v-if="batch.lastError">{{ batch.lastError }}</small>
+              </span>
+              <div><i :style="{ width: `${directoryBatchProgress(batch)}%` }"></i></div>
+              <span>{{ batch.completedCount }}/{{ batch.fileCount }} 文件<span v-if="batch.failedCount"> · {{ batch.failedCount }} 失败</span></span>
+              <strong>{{ directoryBatchStatusText(batch) }}</strong>
+              <button v-if="batch.state === 'queued' || batch.state === 'running'" @click="runDirectoryBatchAction(batch, pauseDirectoryBatch)">暂停</button>
+              <button v-if="batch.state === 'paused'" @click="runDirectoryBatchAction(batch, resumeDirectoryBatch)">继续</button>
+              <button v-if="(batch.state === 'failed' || batch.state === 'cancelled') && batch.commitPhase !== 'rolled_back'" @click="runDirectoryBatchAction(batch, retryDirectoryBatch)">重试</button>
+              <button v-if="batch.state === 'queued' || batch.state === 'running' || batch.state === 'paused'" @click="cancelDirectoryBatchTask(batch, false)">取消并保留</button>
+              <button v-if="batch.state === 'queued' || batch.state === 'running' || batch.state === 'paused'" class="danger-button" @click="cancelDirectoryBatchTask(batch, true)">取消并删除断点</button>
+              <button v-if="batch.requiresRollback || batch.state === 'rollback_required'" class="danger-button" @click="rollbackDirectoryBatchTask(batch)">恢复原目录</button>
+              <button v-if="(batch.state === 'completed' || batch.state === 'cancelled') && !batch.requiresRollback" @click="runDirectoryBatchAction(batch, deleteDirectoryBatch)">删除记录</button>
+            </div>
+          </div>
+          <div v-if="visibleStandaloneTransfers.length" class="transfer-queue">
             <div class="transfer-queue-heading">
-              <span>传输队列（{{ visibleTransfers.length }}）</span>
+              <span>传输队列（{{ visibleStandaloneTransfers.length }}）</span>
               <label class="transfer-concurrency">并发
                 <select :value="transferConcurrency" aria-label="传输并发数" @change="updateTransferConcurrency">
                   <option v-for="value in 5" :key="value" :value="value">{{ value }}</option>
@@ -1971,7 +2076,7 @@ onBeforeUnmount(() => {
               </label>
               <button @click="clearFinishedTransfers">清除已完成</button>
             </div>
-            <div v-for="item in visibleTransfers" :key="item.taskId" class="upload-strip" :class="item.state">
+            <div v-for="item in visibleStandaloneTransfers" :key="item.taskId" class="upload-strip" :class="item.state">
               <span>{{ item.direction === 'upload' ? '上传' : '下载' }} {{ item.fileName }}
                 <small>{{ item.serverLabel }} · {{ item.sourcePath }} → {{ item.targetPath }}</small>
                 <small v-if="item.resumedFrom">已续传 {{ formatSize(item.resumedFrom, 'file') }}</small>

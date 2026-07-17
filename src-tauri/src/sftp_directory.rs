@@ -14,7 +14,7 @@ use tokio::fs;
 
 use crate::ssh::{open_sftp, session_server_id, CommandError, SessionManager};
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DirectoryConflictStrategy {
     Merge,
@@ -23,13 +23,13 @@ pub enum DirectoryConflictStrategy {
     Replace,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryPrepareResult {
-    path: String,
-    skipped: bool,
-    existed: bool,
-    replacement_id: Option<String>,
+    pub(crate) path: String,
+    pub(crate) skipped: bool,
+    pub(crate) existed: bool,
+    pub(crate) replacement_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,8 +45,9 @@ pub struct RemotePathInspection {
     kind: &'static str,
 }
 
-#[derive(Debug, Clone)]
-enum DirectoryReplacement {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "location", rename_all = "snake_case")]
+pub(crate) enum DirectoryReplacement {
     Local {
         target: PathBuf,
         staging: PathBuf,
@@ -120,7 +121,7 @@ impl DirectoryReplacementManager {
         Ok(())
     }
 
-    fn register(
+    pub(crate) fn register(
         &self,
         replacement_id: &str,
         replacement: DirectoryReplacement,
@@ -150,7 +151,7 @@ impl DirectoryReplacementManager {
         Ok(())
     }
 
-    fn get(&self, replacement_id: &str) -> Result<DirectoryReplacement, CommandError> {
+    pub(crate) fn get(&self, replacement_id: &str) -> Result<DirectoryReplacement, CommandError> {
         validate_replacement_id(replacement_id)?;
         self.transactions
             .lock()
@@ -170,9 +171,93 @@ impl DirectoryReplacementManager {
             })
     }
 
-    fn remove(&self, replacement_id: &str) {
+    pub(crate) fn remove(&self, replacement_id: &str) {
         if let Ok(mut transactions) = self.transactions.lock() {
             transactions.remove(replacement_id);
+        }
+    }
+}
+
+pub(crate) fn validate_persisted_replacement(
+    replacement_id: &str,
+    replacement: &DirectoryReplacement,
+    expected_server_id: &str,
+) -> Result<(), CommandError> {
+    validate_replacement_id(replacement_id)?;
+    match replacement {
+        DirectoryReplacement::Local {
+            target,
+            staging,
+            backup,
+        } => {
+            if !target.is_absolute()
+                || local_staging_path(target, replacement_id)? != *staging
+                || local_backup_path(target, replacement_id)? != *backup
+            {
+                return Err(CommandError::new(
+                    "DIRECTORY_REPLACEMENT_PATH_TAMPERED",
+                    "目录替换路径与目标目录不匹配，已禁止恢复或清理",
+                ));
+            }
+        }
+        DirectoryReplacement::Remote {
+            server_id,
+            target,
+            staging,
+            backup,
+        } => {
+            if server_id != expected_server_id
+                || remote_staging_path(target, replacement_id)? != *staging
+                || remote_backup_path(target, replacement_id)? != *backup
+            {
+                return Err(CommandError::new(
+                    "DIRECTORY_REPLACEMENT_PATH_TAMPERED",
+                    "远程目录替换路径或服务器身份不匹配，已禁止恢复或清理",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn finish_persisted_replacement(
+    manager: &SessionManager,
+    replacement_id: &str,
+    replacement: &DirectoryReplacement,
+    expected_server_id: &str,
+    session_id: Option<&str>,
+    commit: bool,
+) -> Result<(), CommandError> {
+    validate_persisted_replacement(replacement_id, replacement, expected_server_id)?;
+    match replacement {
+        DirectoryReplacement::Local {
+            target,
+            staging,
+            backup,
+        } => finish_local_replacement(target, staging, backup, commit).await,
+        DirectoryReplacement::Remote {
+            server_id,
+            target,
+            staging,
+            backup,
+        } => {
+            let session_id = session_id.ok_or_else(|| {
+                CommandError::new(
+                    "DIRECTORY_REPLACEMENT_SESSION_REQUIRED",
+                    "等待对应服务器重新连接后继续目录替换",
+                )
+            })?;
+            let current_server_id = session_server_id(manager, session_id).await?;
+            if &current_server_id != server_id || current_server_id != expected_server_id {
+                return Err(CommandError::new(
+                    "DIRECTORY_REPLACEMENT_SERVER_MISMATCH",
+                    "当前 SSH 会话与目录替换所属服务器不匹配",
+                ));
+            }
+            let sftp = open_sftp(manager, session_id).await?;
+            let result = finish_remote_replacement(&sftp, target, staging, backup, commit).await;
+            sftp.close().await.ok();
+            result
         }
     }
 }
@@ -225,94 +310,7 @@ pub async fn sftp_inspect_remote_path(
     result
 }
 
-#[tauri::command]
-pub async fn sftp_prepare_local_directory(
-    replacements: State<'_, DirectoryReplacementManager>,
-    path: String,
-    conflict_strategy: DirectoryConflictStrategy,
-    replacement_id: Option<String>,
-) -> Result<DirectoryPrepareResult, CommandError> {
-    prepare_local_directory(
-        &replacements,
-        path.trim(),
-        conflict_strategy,
-        replacement_id.as_deref(),
-    )
-    .await
-}
-
-#[tauri::command]
-pub async fn sftp_prepare_remote_directory(
-    manager: State<'_, SessionManager>,
-    replacements: State<'_, DirectoryReplacementManager>,
-    session_id: String,
-    path: String,
-    conflict_strategy: DirectoryConflictStrategy,
-    replacement_id: Option<String>,
-) -> Result<DirectoryPrepareResult, CommandError> {
-    validate_remote_directory_path(&path)?;
-    let server_id = session_server_id(&manager, &session_id).await?;
-    let sftp = open_sftp(&manager, &session_id).await?;
-    let result = prepare_remote_directory(
-        &sftp,
-        &replacements,
-        &server_id,
-        path.trim(),
-        conflict_strategy,
-        replacement_id.as_deref(),
-    )
-    .await;
-    sftp.close().await.ok();
-    result
-}
-
-#[tauri::command]
-pub async fn sftp_finish_directory_replacement(
-    manager: State<'_, SessionManager>,
-    replacements: State<'_, DirectoryReplacementManager>,
-    replacement_id: String,
-    commit: bool,
-    session_id: Option<String>,
-) -> Result<(), CommandError> {
-    let replacement = replacements.get(&replacement_id)?;
-    let result = match replacement {
-        DirectoryReplacement::Local {
-            target,
-            staging,
-            backup,
-        } => finish_local_replacement(&target, &staging, &backup, commit).await,
-        DirectoryReplacement::Remote {
-            server_id,
-            target,
-            staging,
-            backup,
-        } => {
-            let session_id = session_id.ok_or_else(|| {
-                CommandError::new(
-                    "DIRECTORY_REPLACEMENT_SESSION_REQUIRED",
-                    "远程目录替换需要重新连接对应服务器",
-                )
-            })?;
-            let current_server_id = session_server_id(&manager, &session_id).await?;
-            if current_server_id != server_id {
-                return Err(CommandError::new(
-                    "DIRECTORY_REPLACEMENT_SERVER_MISMATCH",
-                    "当前 SSH 会话与目录替换所属服务器不匹配",
-                ));
-            }
-            let sftp = open_sftp(&manager, &session_id).await?;
-            let result = finish_remote_replacement(&sftp, &target, &staging, &backup, commit).await;
-            sftp.close().await.ok();
-            result
-        }
-    };
-    if result.is_ok() {
-        replacements.remove(&replacement_id);
-    }
-    result
-}
-
-async fn prepare_local_directory(
+pub(crate) async fn prepare_local_directory(
     replacements: &DirectoryReplacementManager,
     path: &str,
     strategy: DirectoryConflictStrategy,
@@ -422,7 +420,7 @@ async fn prepare_local_directory(
     }
 }
 
-async fn prepare_remote_directory(
+pub(crate) async fn prepare_remote_directory(
     sftp: &SftpSession,
     replacements: &DirectoryReplacementManager,
     server_id: &str,
@@ -513,7 +511,7 @@ async fn prepare_remote_directory(
     }
 }
 
-async fn finish_local_replacement(
+pub(crate) async fn finish_local_replacement(
     target: &Path,
     staging: &Path,
     backup: &Path,
@@ -539,6 +537,16 @@ async fn finish_local_replacement(
                 CommandError::new("LOCAL_DIRECTORY_RESTORE_FAILED", error.to_string())
             })?;
         }
+        if local_path_exists(target).await?
+            && !local_path_exists(staging).await?
+            && !local_path_exists(backup).await?
+        {
+            return Ok(());
+        }
+        return Ok(());
+    }
+
+    if target_exists && !staging_exists && !backup_exists {
         return Ok(());
     }
 
@@ -583,7 +591,7 @@ async fn finish_local_replacement(
     ))
 }
 
-async fn finish_remote_replacement(
+pub(crate) async fn finish_remote_replacement(
     sftp: &SftpSession,
     target: &str,
     staging: &str,
@@ -616,6 +624,16 @@ async fn finish_remote_replacement(
                 .await
                 .map_err(sftp_error("SFTP_DIRECTORY_RESTORE_FAILED"))?;
         }
+        if remote_path_kind(sftp, target).await? == "directory"
+            && remote_path_kind(sftp, staging).await? == "missing"
+            && remote_path_kind(sftp, backup).await? == "missing"
+        {
+            return Ok(());
+        }
+        return Ok(());
+    }
+
+    if target_kind == "directory" && staging_kind == "missing" && backup_kind == "missing" {
         return Ok(());
     }
 
@@ -1224,5 +1242,110 @@ mod tests {
             .await
             .unwrap();
         fs::remove_dir_all(target).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_commit_and_rollback_are_idempotent() {
+        let target = test_path("idempotent");
+        fs::create_dir_all(&target).await.unwrap();
+        fs::write(target.join("old.txt"), b"old").await.unwrap();
+        let staging = local_staging_path(&target, "idempotent").unwrap();
+        let backup = local_backup_path(&target, "idempotent").unwrap();
+        fs::create_dir_all(&staging).await.unwrap();
+        fs::write(staging.join("new.txt"), b"new").await.unwrap();
+
+        finish_local_replacement(&target, &staging, &backup, true)
+            .await
+            .unwrap();
+        finish_local_replacement(&target, &staging, &backup, true)
+            .await
+            .unwrap();
+        assert!(target.join("new.txt").is_file());
+
+        finish_local_replacement(&target, &staging, &backup, false)
+            .await
+            .unwrap();
+        finish_local_replacement(&target, &staging, &backup, false)
+            .await
+            .unwrap();
+        fs::remove_dir_all(target).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_commit_recovers_each_safe_rename_phase() {
+        let target = test_path("phase-promote");
+        let staging = local_staging_path(&target, "phase-promote").unwrap();
+        let backup = local_backup_path(&target, "phase-promote").unwrap();
+        fs::create_dir_all(&staging).await.unwrap();
+        fs::write(staging.join("new.txt"), b"new").await.unwrap();
+        fs::create_dir_all(&backup).await.unwrap();
+        fs::write(backup.join("old.txt"), b"old").await.unwrap();
+        finish_local_replacement(&target, &staging, &backup, true)
+            .await
+            .unwrap();
+        assert!(target.join("new.txt").is_file());
+        assert!(!backup.exists());
+        fs::remove_dir_all(&target).await.unwrap();
+
+        let target = test_path("phase-cleanup");
+        let staging = local_staging_path(&target, "phase-cleanup").unwrap();
+        let backup = local_backup_path(&target, "phase-cleanup").unwrap();
+        fs::create_dir_all(&target).await.unwrap();
+        fs::write(target.join("new.txt"), b"new").await.unwrap();
+        fs::create_dir_all(&backup).await.unwrap();
+        fs::write(backup.join("old.txt"), b"old").await.unwrap();
+        finish_local_replacement(&target, &staging, &backup, true)
+            .await
+            .unwrap();
+        assert!(target.join("new.txt").is_file());
+        assert!(!backup.exists());
+        fs::remove_dir_all(target).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_commit_rejects_ambiguous_three_directory_state() {
+        let target = test_path("phase-ambiguous");
+        let staging = local_staging_path(&target, "phase-ambiguous").unwrap();
+        let backup = local_backup_path(&target, "phase-ambiguous").unwrap();
+        fs::create_dir_all(&target).await.unwrap();
+        fs::create_dir_all(&staging).await.unwrap();
+        fs::create_dir_all(&backup).await.unwrap();
+        let error = finish_local_replacement(&target, &staging, &backup, true)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "LOCAL_DIRECTORY_REPLACEMENT_INVALID_STATE");
+        assert!(target.is_dir() && staging.is_dir() && backup.is_dir());
+        fs::remove_dir_all(target).await.unwrap();
+        fs::remove_dir_all(staging).await.unwrap();
+        fs::remove_dir_all(backup).await.unwrap();
+    }
+
+    #[test]
+    fn persisted_replacement_rejects_tampered_paths_and_server_ids() {
+        let target = test_path("tampered");
+        let local = DirectoryReplacement::Local {
+            target: target.clone(),
+            staging: target.with_file_name("unrelated-staging"),
+            backup: local_backup_path(&target, "safe-id").unwrap(),
+        };
+        assert_eq!(
+            validate_persisted_replacement("safe-id", &local, "server")
+                .unwrap_err()
+                .code,
+            "DIRECTORY_REPLACEMENT_PATH_TAMPERED"
+        );
+
+        let remote = DirectoryReplacement::Remote {
+            server_id: "server-a".to_owned(),
+            target: "/tmp/target".to_owned(),
+            staging: remote_staging_path("/tmp/target", "safe-id").unwrap(),
+            backup: remote_backup_path("/tmp/target", "safe-id").unwrap(),
+        };
+        assert_eq!(
+            validate_persisted_replacement("safe-id", &remote, "server-b")
+                .unwrap_err()
+                .code,
+            "DIRECTORY_REPLACEMENT_PATH_TAMPERED"
+        );
     }
 }

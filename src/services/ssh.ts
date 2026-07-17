@@ -168,6 +168,7 @@ export type TransferQueueState =
 export type TransferQueueTask = {
   version: number;
   taskId: string;
+  batchId?: string;
   attemptId?: string;
   sessionId?: string;
   availableSessionId?: string;
@@ -201,11 +202,58 @@ export type DirectoryConflictStrategy = "merge" | "skip" | "rename" | "replace";
 export type LocalPathKind = "missing" | "file" | "directory" | "symlink" | "other";
 export type LocalPathInspection = { kind: LocalPathKind; size?: number };
 
-export type DirectoryPrepareResult = {
-  path: string;
-  skipped: boolean;
-  existed: boolean;
+export type DirectoryBatchState =
+  | "preparing"
+  | "queued"
+  | "running"
+  | "paused"
+  | "committing"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "rollback_required";
+
+export type DirectoryCommitPhase =
+  | "prepared"
+  | "committing"
+  | "cleanup_pending"
+  | "completed"
+  | "rollback_pending"
+  | "rolled_back";
+
+export type SftpDirectoryBatch = {
+  version: number;
+  batchId: string;
+  name: string;
+  direction: "upload" | "download";
+  serverId: string;
+  sessionId?: string;
+  serverLabel: string;
+  sourceDirectory: string;
+  targetDirectory: string;
+  writeDirectory: string;
+  conflictStrategy: DirectoryConflictStrategy;
   replacementId?: string;
+  stagingPath?: string;
+  backupPath?: string;
+  taskIds: string[];
+  fileCount: number;
+  completedCount: number;
+  failedCount: number;
+  cancelledCount: number;
+  requiresCommit: boolean;
+  requiresRollback: boolean;
+  commitPhase: DirectoryCommitPhase;
+  state: DirectoryBatchState;
+  createdAt: number;
+  updatedAt: number;
+  lastError?: string;
+};
+
+export type DirectoryBatchSnapshot = {
+  generatedAt: number;
+  maxFilesPerBatch: number;
+  batches: SftpDirectoryBatch[];
 };
 
 export type DiskMetrics = {
@@ -326,6 +374,50 @@ export const setSftpTransferConcurrency = (concurrency: number) =>
 export const wakeSftpTransferQueue = () =>
   invoke<void>("sftp_queue_wake");
 
+export const listSftpDirectoryBatches = () =>
+  invoke<DirectoryBatchSnapshot>("sftp_batch_list");
+
+export const createSftpDirectoryBatch = (request: {
+  sessionId: string;
+  serverLabel: string;
+  direction: "upload" | "download";
+  sourceDirectory: string;
+  targetDirectory: string;
+  conflictStrategy: DirectoryConflictStrategy;
+  directories: string[];
+  fileCount: number;
+}) => invoke<SftpDirectoryBatch>("sftp_batch_create", { request });
+
+export const enqueueSftpDirectoryBatch = (
+  batchId: string,
+  requests: Array<{
+    localPath: string;
+    remotePath: string;
+    conflictStrategy: ConflictStrategy;
+  }>,
+) => invoke<SftpDirectoryBatch>("sftp_batch_enqueue", { batchId, requests });
+
+export const pauseSftpDirectoryBatch = (batchId: string) =>
+  invoke<SftpDirectoryBatch>("sftp_batch_pause", { batchId });
+
+export const resumeSftpDirectoryBatch = (batchId: string) =>
+  invoke<SftpDirectoryBatch>("sftp_batch_resume", { batchId });
+
+export const retrySftpDirectoryBatch = (batchId: string) =>
+  invoke<SftpDirectoryBatch>("sftp_batch_retry", { batchId });
+
+export const cancelSftpDirectoryBatch = (batchId: string, deletePartial: boolean) =>
+  invoke<SftpDirectoryBatch>("sftp_batch_cancel", { batchId, deletePartial });
+
+export const rollbackSftpDirectoryBatch = (batchId: string) =>
+  invoke<SftpDirectoryBatch>("sftp_batch_rollback", { batchId });
+
+export const deleteSftpDirectoryBatch = (batchId: string) =>
+  invoke<void>("sftp_batch_delete", { batchId });
+
+export const wakeSftpDirectoryBatches = () =>
+  invoke<void>("sftp_batch_wake");
+
 export const getLocalDirectoryManifest = (path: string, scanId: string) =>
   invoke<LocalDirectoryManifest>("sftp_local_directory_manifest", { path, scanId });
 
@@ -337,30 +429,6 @@ export const inspectLocalPath = (path: string) =>
 
 export const inspectRemotePath = (sessionId: string, path: string) =>
   invoke<{ kind: LocalPathKind }>("sftp_inspect_remote_path", { sessionId, path });
-
-export const prepareLocalDirectory = (
-  path: string,
-  conflictStrategy: DirectoryConflictStrategy = "merge",
-  replacementId?: string,
-) => invoke<DirectoryPrepareResult>("sftp_prepare_local_directory", { path, conflictStrategy, replacementId });
-
-export const prepareRemoteDirectory = (
-  sessionId: string,
-  path: string,
-  conflictStrategy: DirectoryConflictStrategy = "merge",
-  replacementId?: string,
-) => invoke<DirectoryPrepareResult>("sftp_prepare_remote_directory", {
-  sessionId,
-  path,
-  conflictStrategy,
-  replacementId,
-});
-
-export const finishDirectoryReplacement = (
-  replacementId: string,
-  commit: boolean,
-  sessionId?: string,
-) => invoke<void>("sftp_finish_directory_replacement", { replacementId, commit, sessionId });
 
 export const createSftpDirectory = (sessionId: string, path: string) =>
   invoke<void>("sftp_create_directory", { sessionId, path });
@@ -376,6 +444,11 @@ export const deleteSftpDirectoryRecursive = (sessionId: string, path: string) =>
 
 export const listenSftpQueueTasks = (handler: (task: TransferQueueTask) => void): Promise<UnlistenFn> =>
   listen<TransferQueueTask>("sftp-queue-task", ({ payload }) => handler(payload));
+
+export const listenSftpDirectoryBatches = (
+  handler: (batch: SftpDirectoryBatch) => void,
+): Promise<UnlistenFn> =>
+  listen<SftpDirectoryBatch>("sftp-directory-batch", ({ payload }) => handler(payload));
 
 export const fetchSystemMetrics = (sessionId: string) =>
   invoke<SystemMetrics>("system_metrics", { sessionId });
