@@ -1,7 +1,7 @@
 # LiteShell SFTP 修改计划
 
-更新时间：2026-07-16  
-状态：原九阶段改造已完成；双栏文件管理 PR1 已合并；PR2 已完成实现并通过初始 CI，当前待验证
+更新时间：2026-07-17
+状态：原九阶段和双栏文件管理改造已进入主线；当前开发“持久化目录传输批次与目录替换事务”，分支待验证
 执行原则：先修复数据安全和一致性问题，再完善传输可靠性，最后扩展交互功能。
 
 ## 1. 文档定位
@@ -949,12 +949,12 @@ cancelled
 8. 后端统一传输队列、暂停和恢复。
 9. SFTP 导航与批量操作完善。
 
-原九阶段计划到此结束。后续双栏文件管理按下述新顺序执行。
+原九阶段计划到此结束。后续双栏文件管理按下述新顺序执行；目录批次一致性补强见第 18 节。
 
 ## 17. SFTP 双栏文件管理改造
 
 更新时间：2026-07-16  
-当前状态：PR1 已合并并完成本地验证门禁；PR2 已完成实现，PR #14 初始 CI 已通过，当前等待最终文档 head 的 CI、code review 和合并。
+当前状态：PR1 和 PR2 已进入当前 `main` 基线；本节保留为历史实现与验收记录。
 
 执行顺序：
 
@@ -1008,7 +1008,7 @@ cancelled
 
 ### 17.2 PR2：地址栏、工具栏和文件列表优化
 
-状态：`待验证`
+状态：`已完成`
 
 分支：`feat/sftp-path-toolbar-polish`
 
@@ -1050,4 +1050,96 @@ PR 前本地/桌面验收：
 - 文件列表类型列、sticky 表头、横向/纵向独立滚动正常。
 - 双会话切换、中文、空格、超长路径、大量文件和高延迟服务器。
 
-下一步：等待最终文档 head 的 `main...branch` 范围检查、GitHub Actions、code review；全部通过后 squash merge，再进入完整 SFTP 实机验收。
+当前 `main` 基线已包含该实现；后续完整 SFTP 实机验收与第 18 节目录批次一致性补强分开执行。
+
+## 18. 持久化目录传输批次与目录替换事务
+
+状态：`待验证`
+
+分支：`fix/sftp-directory-batch-recovery`
+
+### 问题原因
+
+- 文件传输队列和检查点能够持久化，但目录上传/下载的父级流程、staging、backup 和最终提交仍由 `App.vue` 与内存中的 `DirectoryReplacementManager` 控制。
+- 应用退出后，queued 子任务可能继续恢复，却没有持久化协调者负责最终 commit 或 rollback。
+- 前端逐个入队会在中途失败时留下部分任务；目录扫描上限 100000 与队列上限 10000 也缺少统一的开始前门禁。
+
+### 实现范围
+
+- 新增 Rust `sftp_batch` 模块，后端成为目录批次状态的唯一事实来源。
+- 使用两阶段流程：先持久化并准备批次，再全量校验文件请求并一次性原子入队。
+- 队列任务增加可选 `batch_id`；普通单文件任务保持 `None`，目录子任务禁止单独暂停、恢复、重试或取消。
+- 新增父批次统一暂停、恢复、取消、重试、回滚和安全删除记录命令。
+- 抽取 `atomic_file`，队列、检查点和目录批次复用 Windows `MoveFileExW` 原子替换，不先删除旧文件。
+- 单次目录批次最多 5000 个文件；创建目标或 staging 前同时检查目录批次上限和队列剩余容量。
+- 前端新增目录批次快照/事件状态模块和紧凑批次面板，目录上传、目录下载不再自行提交目录替换。
+- Code Review 后补强：replacement 完整意图在任何外部变更前落盘；rollback 使用无副作用状态矩阵；dispatch/终态采用磁盘优先安装；父子记录联合清理；扫描文件显式 transfer/skip 记账。
+
+### 批次状态机
+
+```text
+preparing
+  -> queued -> running -> paused -> queued
+  -> committing -> completed
+  -> failed | cancelled -> rollback_required
+```
+
+持久化终态和恢复状态完整支持：
+
+```text
+preparing
+queued
+running
+paused
+committing
+completed
+failed
+cancelled
+rollback_required
+```
+
+### 重启恢复规则
+
+- `preparing`：未开始原子入队时按已持久化 replacement/owned-root 意图决定 failed 或 rollback_required；已记录 transfer/skip 数量时，只允许采用数量完全一致的 `batch_id` 子任务集合。
+- `queued`：保留 queued，按后端验证的 `server_id` 等待服务器重新连接。
+- `running`：队列根据真实检查点恢复为 paused 或 failed；父批次从子任务真实状态重新计算。
+- `committing`：重新检查 target、staging、backup 的真实类型和组合；安全阶段继续 commit，歧义状态进入 `rollback_required`。
+- `failed/cancelled`：替换批次保留 staging/backup 绑定并允许重试或回滚；无法证明安全的 merge/rename 清理不会自动删除数据。
+- `completed`：保留有限恢复记录，用户可显式删除；完成批次不会被旧 running 快照覆盖。
+
+### 已完成测试
+
+- 批次存储序列化、反序列化和未来版本拒绝。
+- 队列容量不足时预检查失败；模拟持久化失败时内存任务列表不改变。
+- 普通单文件任务不带 `batch_id`，目录子任务持久化父批次关联并禁用单任务暂停。
+- 子任务全部完成进入 committing；任一失败不 commit；重启后的 paused 子任务使父批次恢复 paused。
+- 本地目录 commit 覆盖三个可恢复 rename 阶段，歧义三目录状态停止操作。
+- commit/rollback 重复调用幂等。
+- 持久化 staging/backup 路径篡改和远程 `server_id` 不匹配会拒绝恢复。
+- rollback 的 8 种 target/staging/backup 布尔组合共用同一判定矩阵；两种歧义状态保持现场不变。
+- dispatch 与 worker terminal 写盘失败不会安装候选运行时状态，也不会通知父批次 commit。
+- 缺失部分 task ID、扫描/transfer/skip 数量不一致都会禁止提交。
+- 活跃批次 completed 子任务不会被通用 clear 删除；父记录删除要求所有子任务终态且没有保留断点。
+- backup 清理失败保持 `committing/cleanup_pending` 并支持重试，不开放 rollback。
+- 前端快照/事件单调合并、多服务器隔离、旧 running 不覆盖 completed，以及四种终态识别。
+
+当前验证：
+
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`：通过。
+- Node.js `24.16.0` 下 `npm ci`：通过。
+- `npm run check`（Rust 格式、Clippy correctness/suspicious、Vue 类型检查）：通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features`：65 项通过。
+- `npm run test:frontend`：29 项通过。
+- 初始提交的 `npm run validate` 由用户执行并报告通过；Code Review 修复后的生产构建仍需重新验证。
+
+### 仍需真实 SFTP 验证
+
+- 专用临时目录内分别验证 upload/download 的 merge、skip、rename、replace。
+- queued、running、paused、committing 四个窗口退出并重启，确认等待重连、继续传输、提交或回滚提示正确。
+- replace 在 target→backup 与 staging→target 两个 rename 窗口中断后的恢复。
+- 服务器断线后使用同一已验证主机身份重连可以恢复，其他服务器不能接管。
+- 5000 个文件边界与 5001 个文件提前拒绝，不得产生任何远程写入。
+- 取消并保留、取消并删除断点、失败重试和恢复原目录。
+- Windows junction、本地 symlink、远程 symlink、超长路径、特殊字符、权限不足和磁盘满。
+
+本 PR 不修改 SSH 认证、主机密钥、Windows Credential Manager 或普通单文件传输语义，不执行真实远程服务器写入测试。

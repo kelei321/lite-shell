@@ -1,6 +1,8 @@
+mod atomic_file;
 mod monitor;
 mod profiles;
 mod sftp;
+mod sftp_batch;
 mod sftp_directory;
 mod sftp_queue;
 mod sftp_recursive;
@@ -16,14 +18,18 @@ use sftp::{
     sftp_cancel_transfer, sftp_create_directory, sftp_delete, sftp_delete_recursive, sftp_list,
     sftp_list_directories, sftp_rename, SftpTransferManager,
 };
+use sftp_batch::{
+    initialize_directory_batches, sftp_batch_cancel, sftp_batch_create, sftp_batch_delete,
+    sftp_batch_enqueue, sftp_batch_list, sftp_batch_pause, sftp_batch_resume, sftp_batch_retry,
+    sftp_batch_rollback, sftp_batch_wake, SftpDirectoryBatchManager,
+};
 use sftp_directory::{
-    sftp_finish_directory_replacement, sftp_inspect_local_path, sftp_inspect_remote_path,
-    sftp_prepare_local_directory, sftp_prepare_remote_directory, DirectoryReplacementManager,
+    sftp_inspect_local_path, sftp_inspect_remote_path, DirectoryReplacementManager,
 };
 use sftp_queue::{
     initialize_transfer_queue, sftp_queue_cancel, sftp_queue_clear_completed, sftp_queue_enqueue,
-    sftp_queue_list, sftp_queue_pause, sftp_queue_resume, sftp_queue_retry,
-    sftp_queue_set_concurrency, sftp_queue_wake, SftpTransferQueue,
+    sftp_queue_enqueue_batch, sftp_queue_list, sftp_queue_pause, sftp_queue_resume,
+    sftp_queue_retry, sftp_queue_set_concurrency, sftp_queue_wake, SftpTransferQueue,
 };
 use sftp_recursive::{sftp_local_directory_manifest, sftp_remote_directory_manifest};
 use ssh::{ssh_connect, ssh_connect_profile, ssh_disconnect, ssh_resize, ssh_send, SessionManager};
@@ -36,11 +42,16 @@ pub fn run() {
         .manage(SystemMonitor::default())
         .manage(SftpTransferManager::default())
         .manage(SftpTransferQueue::default())
+        .manage(SftpDirectoryBatchManager::default())
         .manage(DirectoryReplacementManager::default())
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 initialize_transfer_queue(handle).await;
+            });
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                initialize_directory_batches(handle).await;
             });
             Ok(())
         })
@@ -66,6 +77,7 @@ pub fn run() {
             sftp_cancel_transfer,
             sftp_queue_list,
             sftp_queue_enqueue,
+            sftp_queue_enqueue_batch,
             sftp_queue_pause,
             sftp_queue_resume,
             sftp_queue_retry,
@@ -73,13 +85,20 @@ pub fn run() {
             sftp_queue_clear_completed,
             sftp_queue_set_concurrency,
             sftp_queue_wake,
+            sftp_batch_list,
+            sftp_batch_create,
+            sftp_batch_enqueue,
+            sftp_batch_pause,
+            sftp_batch_resume,
+            sftp_batch_retry,
+            sftp_batch_cancel,
+            sftp_batch_rollback,
+            sftp_batch_delete,
+            sftp_batch_wake,
             sftp_local_directory_manifest,
             sftp_remote_directory_manifest,
             sftp_inspect_local_path,
             sftp_inspect_remote_path,
-            sftp_prepare_local_directory,
-            sftp_prepare_remote_directory,
-            sftp_finish_directory_replacement,
             sftp_create_directory,
             sftp_rename,
             sftp_delete,
