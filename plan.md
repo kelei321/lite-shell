@@ -1073,6 +1073,7 @@ PR 前本地/桌面验收：
 - 抽取 `atomic_file`，队列、检查点和目录批次复用 Windows `MoveFileExW` 原子替换，不先删除旧文件。
 - 单次目录批次最多 5000 个文件；创建目标或 staging 前同时检查目录批次上限和队列剩余容量。
 - 前端新增目录批次快照/事件状态模块和紧凑批次面板，目录上传、目录下载不再自行提交目录替换。
+- Code Review 后补强：replacement 完整意图在任何外部变更前落盘；rollback 使用无副作用状态矩阵；dispatch/终态采用磁盘优先安装；父子记录联合清理；扫描文件显式 transfer/skip 记账。
 
 ### 批次状态机
 
@@ -1099,7 +1100,7 @@ rollback_required
 
 ### 重启恢复规则
 
-- `preparing`：如果没有已持久化子任务，进入 `rollback_required`；如果队列文件已成功落盘，则通过 `batch_id` 重新发现子任务并继续协调。
+- `preparing`：未开始原子入队时按已持久化 replacement/owned-root 意图决定 failed 或 rollback_required；已记录 transfer/skip 数量时，只允许采用数量完全一致的 `batch_id` 子任务集合。
 - `queued`：保留 queued，按后端验证的 `server_id` 等待服务器重新连接。
 - `running`：队列根据真实检查点恢复为 paused 或 failed；父批次从子任务真实状态重新计算。
 - `committing`：重新检查 target、staging、backup 的真实类型和组合；安全阶段继续 commit，歧义状态进入 `rollback_required`。
@@ -1115,6 +1116,11 @@ rollback_required
 - 本地目录 commit 覆盖三个可恢复 rename 阶段，歧义三目录状态停止操作。
 - commit/rollback 重复调用幂等。
 - 持久化 staging/backup 路径篡改和远程 `server_id` 不匹配会拒绝恢复。
+- rollback 的 8 种 target/staging/backup 布尔组合共用同一判定矩阵；两种歧义状态保持现场不变。
+- dispatch 与 worker terminal 写盘失败不会安装候选运行时状态，也不会通知父批次 commit。
+- 缺失部分 task ID、扫描/transfer/skip 数量不一致都会禁止提交。
+- 活跃批次 completed 子任务不会被通用 clear 删除；父记录删除要求所有子任务终态且没有保留断点。
+- backup 清理失败保持 `committing/cleanup_pending` 并支持重试，不开放 rollback。
 - 前端快照/事件单调合并、多服务器隔离、旧 running 不覆盖 completed，以及四种终态识别。
 
 当前验证：
@@ -1122,9 +1128,9 @@ rollback_required
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`：通过。
 - Node.js `24.16.0` 下 `npm ci`：通过。
 - `npm run check`（Rust 格式、Clippy correctness/suspicious、Vue 类型检查）：通过。
-- `cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features`：53 项通过。
+- `cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features`：65 项通过。
 - `npm run test:frontend`：29 项通过。
-- `npm run validate`：用户已在本地执行并报告通过（包含生产构建）。
+- 初始提交的 `npm run validate` 由用户执行并报告通过；Code Review 修复后的生产构建仍需重新验证。
 
 ### 仍需真实 SFTP 验证
 

@@ -89,6 +89,7 @@ export function useSftpDirectoryBatches() {
       localPath: string;
       remotePath: string;
       conflictStrategy: ConflictStrategy;
+      action: "transfer" | "skip";
     }>,
   ) {
     const batch = await enqueueSftpDirectoryBatch(batchId, requests);

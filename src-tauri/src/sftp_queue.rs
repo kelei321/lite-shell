@@ -288,6 +288,74 @@ pub(crate) async fn tasks_for_batch(
         .collect())
 }
 
+pub(crate) async fn remove_directory_batch_tasks(
+    app: &AppHandle,
+    queue: &SftpTransferQueue,
+    batch_id: &str,
+) -> Result<(), CommandError> {
+    validate_queue_id(batch_id)?;
+    let _persist_guard = queue.persist_lock.lock().await;
+    let mut inner = queue.inner.lock().await;
+    let matching = inner
+        .tasks
+        .iter()
+        .filter(|task| task.batch_id.as_deref() == Some(batch_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    validate_directory_batch_task_removal(&matching)?;
+    let removed_ids = matching
+        .iter()
+        .map(|task| task.task_id.clone())
+        .collect::<HashSet<_>>();
+    let next_tasks = without_batch_tasks(&inner.tasks, batch_id);
+    let store = QueueStore {
+        version: QUEUE_VERSION,
+        concurrency: inner.concurrency,
+        tasks: next_tasks.clone(),
+    };
+    persist_queue_store(app, &store).await?;
+    inner.tasks = next_tasks;
+    inner
+        .actions
+        .retain(|task_id, _| !removed_ids.contains(task_id));
+    inner
+        .running
+        .retain(|task_id| !removed_ids.contains(task_id));
+    inner
+        .restored_waiting
+        .retain(|task_id| !removed_ids.contains(task_id));
+    Ok(())
+}
+
+fn validate_directory_batch_task_removal(tasks: &[TransferQueueTask]) -> Result<(), CommandError> {
+    if tasks.iter().any(|task| {
+        !matches!(
+            task.state,
+            QueueTaskState::Completed | QueueTaskState::Failed | QueueTaskState::Cancelled
+        )
+    }) {
+        return Err(CommandError::new(
+            "DIRECTORY_BATCH_TASKS_BUSY",
+            "目录批次仍有未结束子任务，不能删除父记录",
+        ));
+    }
+    if tasks.iter().any(|task| task.checkpoint_available) {
+        return Err(CommandError::new(
+            "DIRECTORY_BATCH_CHECKPOINTS_REMAIN",
+            "目录批次仍有保留的断点，请先执行取消并删除断点",
+        ));
+    }
+    Ok(())
+}
+
+fn without_batch_tasks(tasks: &[TransferQueueTask], batch_id: &str) -> Vec<TransferQueueTask> {
+    tasks
+        .iter()
+        .filter(|task| task.batch_id.as_deref() != Some(batch_id))
+        .cloned()
+        .collect()
+}
+
 pub(crate) async fn pause_directory_batch_tasks(
     app: &AppHandle,
     queue: &SftpTransferQueue,
@@ -642,6 +710,22 @@ fn install_persisted_tasks(
     Ok(())
 }
 
+fn install_persisted_runtime(
+    current: &mut QueueInner,
+    next_tasks: Vec<TransferQueueTask>,
+    next_running: HashSet<String>,
+    next_actions: HashMap<String, RequestedAction>,
+    next_restored_waiting: HashSet<String>,
+    persist_result: Result<(), CommandError>,
+) -> Result<(), CommandError> {
+    persist_result?;
+    current.tasks = next_tasks;
+    current.running = next_running;
+    current.actions = next_actions;
+    current.restored_waiting = next_restored_waiting;
+    Ok(())
+}
+
 fn normalize_batch_target(path: &str, direction: QueueDirection) -> String {
     let value = path.trim().replace('\\', "/");
     if direction == QueueDirection::Download {
@@ -865,13 +949,22 @@ pub async fn sftp_queue_clear_completed(
     queue: State<'_, SftpTransferQueue>,
 ) -> Result<(), CommandError> {
     ensure_initialized(&app, &queue).await?;
-    {
-        let mut inner = queue.inner.lock().await;
-        inner
-            .tasks
-            .retain(|task| task.state != QueueTaskState::Completed);
-    }
-    persist_current(&app, &queue).await
+    let _persist_guard = queue.persist_lock.lock().await;
+    let mut inner = queue.inner.lock().await;
+    let next_tasks = inner
+        .tasks
+        .iter()
+        .filter(|task| !is_clearable_completed_task(task))
+        .cloned()
+        .collect::<Vec<_>>();
+    let store = QueueStore {
+        version: QUEUE_VERSION,
+        concurrency: inner.concurrency,
+        tasks: next_tasks.clone(),
+    };
+    persist_queue_store(&app, &store).await?;
+    inner.tasks = next_tasks;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1075,31 +1168,11 @@ async fn dispatch_one(app: &AppHandle) -> Result<bool, CommandError> {
     for candidate in candidates {
         let session_id = matching_session_id(&manager, &candidate.server_id).await;
         let Some(session_id) = session_id else {
-            let mut changed_task = None;
-            {
-                let mut inner = queue.inner.lock().await;
-                let index = match task_index(&inner.tasks, &candidate.task_id) {
-                    Ok(index) => index,
-                    Err(_) => continue,
-                };
-                if inner.tasks[index].state != QueueTaskState::Queued {
-                    continue;
-                }
-                inner.restored_waiting.insert(candidate.task_id.clone());
-                if inner.tasks[index].message.as_deref() != Some("等待重新连接服务器") {
-                    inner.tasks[index].message = Some("等待重新连接服务器".to_owned());
-                    inner.tasks[index].updated_at = unix_now();
-                    changed_task = Some(inner.tasks[index].clone());
-                }
-            }
-            if let Some(task) = changed_task {
-                persist_current(app, &queue).await?;
-                emit_task(app, &task);
-            }
             continue;
         };
 
         let task = {
+            let _persist_guard = queue.persist_lock.lock().await;
             let mut inner = queue.inner.lock().await;
             if inner.running.len() >= usize::from(inner.concurrency) {
                 return Ok(false);
@@ -1111,20 +1184,41 @@ async fn dispatch_one(app: &AppHandle) -> Result<bool, CommandError> {
             if inner.tasks[index].state != QueueTaskState::Queued {
                 continue;
             }
+            let mut next_tasks = inner.tasks.clone();
+            let mut next_running = inner.running.clone();
+            let mut next_actions = inner.actions.clone();
+            let mut next_restored_waiting = inner.restored_waiting.clone();
             let attempt_id = new_id("attempt");
-            inner.tasks[index].state = QueueTaskState::Running;
-            inner.tasks[index].attempt_id = Some(attempt_id);
-            inner.tasks[index].session_id = Some(session_id);
-            inner.tasks[index].message = None;
-            inner.tasks[index].speed_bytes_per_second = 0;
-            inner.tasks[index].eta_seconds = None;
-            inner.tasks[index].updated_at = unix_now();
-            inner.running.insert(candidate.task_id.clone());
-            inner.actions.remove(&candidate.task_id);
-            inner.restored_waiting.remove(&candidate.task_id);
-            inner.tasks[index].clone()
+            next_tasks[index].state = QueueTaskState::Running;
+            next_tasks[index].attempt_id = Some(attempt_id);
+            next_tasks[index].session_id = Some(session_id);
+            next_tasks[index].message = None;
+            next_tasks[index].speed_bytes_per_second = 0;
+            next_tasks[index].eta_seconds = None;
+            next_tasks[index].updated_at = unix_now();
+            next_running.insert(candidate.task_id.clone());
+            next_actions.remove(&candidate.task_id);
+            next_restored_waiting.remove(&candidate.task_id);
+            let task = next_tasks[index].clone();
+            let persist_result = persist_queue_store(
+                app,
+                &QueueStore {
+                    version: QUEUE_VERSION,
+                    concurrency: inner.concurrency,
+                    tasks: next_tasks.clone(),
+                },
+            )
+            .await;
+            install_persisted_runtime(
+                &mut inner,
+                next_tasks,
+                next_running,
+                next_actions,
+                next_restored_waiting,
+                persist_result,
+            )?;
+            task
         };
-        persist_current(app, &queue).await?;
         emit_task(app, &task);
         handle_queue_task_update(app, &task).await;
         let worker_app = app.clone();
@@ -1201,26 +1295,56 @@ async fn run_task(app: AppHandle, task: TransferQueueTask) {
 
 async fn finish_worker_success(app: &AppHandle, task_id: &str, result: TransferResult) {
     let queue = app.state::<SftpTransferQueue>();
-    let task = {
+    let task_result = async {
+        let _persist_guard = queue.persist_lock.lock().await;
         let mut inner = queue.inner.lock().await;
         let Ok(index) = task_index(&inner.tasks, task_id) else {
-            return;
+            return Ok(None);
         };
-        inner.running.remove(task_id);
-        inner.actions.remove(task_id);
-        inner.tasks[index].attempt_id = None;
-        inner.tasks[index].state = QueueTaskState::Completed;
-        inner.tasks[index].transferred = inner.tasks[index].total;
-        inner.tasks[index].speed_bytes_per_second = 0;
-        inner.tasks[index].eta_seconds = Some(0);
-        inner.tasks[index].resumed_from = result.resumed_from;
-        inner.tasks[index].checkpoint_available = false;
-        inner.tasks[index].message = result.skipped.then(|| "目标已存在，任务已跳过".to_owned());
-        inner.tasks[index].target_path = result.path;
-        inner.tasks[index].updated_at = unix_now();
-        inner.tasks[index].clone()
+        let mut next_tasks = inner.tasks.clone();
+        let mut next_running = inner.running.clone();
+        let mut next_actions = inner.actions.clone();
+        next_running.remove(task_id);
+        next_actions.remove(task_id);
+        next_tasks[index].attempt_id = None;
+        next_tasks[index].state = QueueTaskState::Completed;
+        next_tasks[index].transferred = next_tasks[index].total;
+        next_tasks[index].speed_bytes_per_second = 0;
+        next_tasks[index].eta_seconds = Some(0);
+        next_tasks[index].resumed_from = result.resumed_from;
+        next_tasks[index].checkpoint_available = false;
+        next_tasks[index].message = result.skipped.then(|| "目标已存在，任务已跳过".to_owned());
+        next_tasks[index].target_path = result.path;
+        next_tasks[index].updated_at = unix_now();
+        let task = next_tasks[index].clone();
+        let persist_result = persist_queue_store(
+            app,
+            &QueueStore {
+                version: QUEUE_VERSION,
+                concurrency: inner.concurrency,
+                tasks: next_tasks.clone(),
+            },
+        )
+        .await;
+        let next_restored_waiting = inner.restored_waiting.clone();
+        install_persisted_runtime(
+            &mut inner,
+            next_tasks,
+            next_running,
+            next_actions,
+            next_restored_waiting,
+            persist_result,
+        )?;
+        Ok::<_, CommandError>(Some(task))
     };
-    let _ = persist_current(app, &queue).await;
+    let task = match task_result.await {
+        Ok(Some(task)) => task,
+        Ok(None) => return,
+        Err(error) => {
+            emit_queue_persistence_error(app, task_id, &error);
+            return;
+        }
+    };
     emit_task(app, &task);
     handle_queue_task_update(app, &task).await;
     queue.notify.notify_one();
@@ -1246,30 +1370,34 @@ async fn finish_worker_error(app: &AppHandle, task_id: &str, error: CommandError
     };
     let error_code = error.code;
     let error_message = error.message;
-    let task = {
+    let task_result = async {
+        let _persist_guard = queue.persist_lock.lock().await;
         let mut inner = queue.inner.lock().await;
         let Ok(index) = task_index(&inner.tasks, task_id) else {
-            return;
+            return Ok(None);
         };
-        inner.running.remove(task_id);
-        inner.actions.remove(task_id);
-        inner.tasks[index].attempt_id = None;
+        let mut next_tasks = inner.tasks.clone();
+        let mut next_running = inner.running.clone();
+        let mut next_actions = inner.actions.clone();
+        next_running.remove(task_id);
+        next_actions.remove(task_id);
+        next_tasks[index].attempt_id = None;
         match action {
             Some(RequestedAction::Pause) => {
-                inner.tasks[index].checkpoint_available = has_checkpoint;
+                next_tasks[index].checkpoint_available = has_checkpoint;
                 if has_checkpoint {
-                    inner.tasks[index].state = QueueTaskState::Paused;
-                    inner.tasks[index].message = Some("任务已从真实检查点安全暂停".to_owned());
+                    next_tasks[index].state = QueueTaskState::Paused;
+                    next_tasks[index].message = Some("任务已从真实检查点安全暂停".to_owned());
                 } else {
-                    inner.tasks[index].state = QueueTaskState::Failed;
-                    inner.tasks[index].message =
+                    next_tasks[index].state = QueueTaskState::Failed;
+                    next_tasks[index].message =
                         Some(format!("无法安全暂停，未生成可恢复断点：{error_message}"));
                 }
             }
             Some(RequestedAction::CancelKeep) => {
-                inner.tasks[index].state = QueueTaskState::Cancelled;
-                inner.tasks[index].checkpoint_available = has_checkpoint;
-                inner.tasks[index].message = Some(if has_checkpoint {
+                next_tasks[index].state = QueueTaskState::Cancelled;
+                next_tasks[index].checkpoint_available = has_checkpoint;
+                next_tasks[index].message = Some(if has_checkpoint {
                     "任务已取消，断点已保留".to_owned()
                 } else {
                     "任务已取消，尚未产生断点".to_owned()
@@ -1277,16 +1405,16 @@ async fn finish_worker_error(app: &AppHandle, task_id: &str, error: CommandError
             }
             Some(RequestedAction::CancelDelete) => match discard_result {
                 Some(Ok(())) => {
-                    inner.tasks[index].state = QueueTaskState::Cancelled;
-                    inner.tasks[index].message = Some("任务已取消，断点已删除".to_owned());
-                    inner.tasks[index].checkpoint_available = false;
-                    inner.tasks[index].transferred = 0;
-                    inner.tasks[index].resumed_from = 0;
+                    next_tasks[index].state = QueueTaskState::Cancelled;
+                    next_tasks[index].message = Some("任务已取消，断点已删除".to_owned());
+                    next_tasks[index].checkpoint_available = false;
+                    next_tasks[index].transferred = 0;
+                    next_tasks[index].resumed_from = 0;
                 }
                 Some(Err(discard_error)) => {
-                    inner.tasks[index].state = QueueTaskState::Failed;
-                    inner.tasks[index].checkpoint_available = has_checkpoint;
-                    inner.tasks[index].message = Some(format!(
+                    next_tasks[index].state = QueueTaskState::Failed;
+                    next_tasks[index].checkpoint_available = has_checkpoint;
+                    next_tasks[index].message = Some(format!(
                         "任务已停止，但删除断点失败：{}",
                         discard_error.message
                     ));
@@ -1294,24 +1422,61 @@ async fn finish_worker_error(app: &AppHandle, task_id: &str, error: CommandError
                 None => {}
             },
             None => {
-                inner.tasks[index].state = if error_code == "TRANSFER_CANCELLED" {
+                next_tasks[index].state = if error_code == "TRANSFER_CANCELLED" {
                     QueueTaskState::Cancelled
                 } else {
                     QueueTaskState::Failed
                 };
-                inner.tasks[index].checkpoint_available = has_checkpoint;
-                inner.tasks[index].message = Some(error_message);
+                next_tasks[index].checkpoint_available = has_checkpoint;
+                next_tasks[index].message = Some(error_message);
             }
         }
-        inner.tasks[index].speed_bytes_per_second = 0;
-        inner.tasks[index].eta_seconds = None;
-        inner.tasks[index].updated_at = unix_now();
-        inner.tasks[index].clone()
+        next_tasks[index].speed_bytes_per_second = 0;
+        next_tasks[index].eta_seconds = None;
+        next_tasks[index].updated_at = unix_now();
+        let task = next_tasks[index].clone();
+        let persist_result = persist_queue_store(
+            app,
+            &QueueStore {
+                version: QUEUE_VERSION,
+                concurrency: inner.concurrency,
+                tasks: next_tasks.clone(),
+            },
+        )
+        .await;
+        let next_restored_waiting = inner.restored_waiting.clone();
+        install_persisted_runtime(
+            &mut inner,
+            next_tasks,
+            next_running,
+            next_actions,
+            next_restored_waiting,
+            persist_result,
+        )?;
+        Ok::<_, CommandError>(Some(task))
     };
-    let _ = persist_current(app, &queue).await;
+    let task = match task_result.await {
+        Ok(Some(task)) => task,
+        Ok(None) => return,
+        Err(error) => {
+            emit_queue_persistence_error(app, task_id, &error);
+            return;
+        }
+    };
     emit_task(app, &task);
     handle_queue_task_update(app, &task).await;
     queue.notify.notify_one();
+}
+
+fn emit_queue_persistence_error(app: &AppHandle, task_id: &str, error: &CommandError) {
+    let _ = app.emit(
+        "sftp-queue-error",
+        serde_json::json!({
+            "taskId": task_id,
+            "code": error.code,
+            "message": format!("传输终态持久化失败，未更新父批次：{}", error.message),
+        }),
+    );
 }
 
 async fn progress_loop(app: AppHandle, mut receiver: broadcast::Receiver<TransferEvent>) {
@@ -1468,6 +1633,10 @@ fn ensure_individual_task_control(task: &TransferQueueTask) -> Result<(), Comman
         ));
     }
     Ok(())
+}
+
+fn is_clearable_completed_task(task: &TransferQueueTask) -> bool {
+    task.state == QueueTaskState::Completed && task.batch_id.is_none()
 }
 
 fn validate_enqueue_request(request: &EnqueueTransferRequest) -> Result<(), CommandError> {
@@ -1736,6 +1905,45 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_and_terminal_persist_failure_do_not_change_runtime_state() {
+        let queued = task("candidate", "a", QueueTaskState::Queued, 1);
+        let mut current = QueueInner {
+            tasks: vec![queued.clone()],
+            ..QueueInner::default()
+        };
+        let mut next_tasks = vec![queued];
+        next_tasks[0].state = QueueTaskState::Running;
+        let next_running = HashSet::from(["candidate".to_owned()]);
+        let result = install_persisted_runtime(
+            &mut current,
+            next_tasks,
+            next_running,
+            HashMap::new(),
+            HashSet::new(),
+            Err(CommandError::new("TEST_WRITE_FAILED", "simulated")),
+        );
+        assert_eq!(result.unwrap_err().code, "TEST_WRITE_FAILED");
+        assert_eq!(current.tasks[0].state, QueueTaskState::Queued);
+        assert!(current.running.is_empty());
+
+        current.tasks[0].state = QueueTaskState::Running;
+        current.running.insert("candidate".to_owned());
+        let mut terminal_tasks = current.tasks.clone();
+        terminal_tasks[0].state = QueueTaskState::Completed;
+        let result = install_persisted_runtime(
+            &mut current,
+            terminal_tasks,
+            HashSet::new(),
+            HashMap::new(),
+            HashSet::new(),
+            Err(CommandError::new("TEST_WRITE_FAILED", "simulated")),
+        );
+        assert_eq!(result.unwrap_err().code, "TEST_WRITE_FAILED");
+        assert_eq!(current.tasks[0].state, QueueTaskState::Running);
+        assert!(current.running.contains("candidate"));
+    }
+
+    #[test]
     fn directory_children_keep_batch_id_and_single_files_do_not() {
         let single = task("single", "a", QueueTaskState::Queued, 1);
         assert!(single.batch_id.is_none());
@@ -1758,5 +1966,45 @@ mod tests {
 
         let single = task("single", "a", QueueTaskState::Paused, 2);
         ensure_individual_task_control(&single).unwrap();
+    }
+
+    #[test]
+    fn clear_completed_preserves_directory_batch_children() {
+        let standalone = task("single", "a", QueueTaskState::Completed, 1);
+        assert!(is_clearable_completed_task(&standalone));
+
+        let mut child = task("child", "a", QueueTaskState::Completed, 2);
+        child.batch_id = Some("directory-batch-safe".to_owned());
+        assert!(!is_clearable_completed_task(&child));
+    }
+
+    #[test]
+    fn parent_deletion_requires_terminal_children_without_checkpoints() {
+        let completed = task("completed", "a", QueueTaskState::Completed, 1);
+        validate_directory_batch_task_removal(&[completed]).unwrap();
+
+        let running = task("running", "a", QueueTaskState::Running, 2);
+        assert_eq!(
+            validate_directory_batch_task_removal(&[running])
+                .unwrap_err()
+                .code,
+            "DIRECTORY_BATCH_TASKS_BUSY"
+        );
+
+        let mut paused = task("paused", "a", QueueTaskState::Cancelled, 3);
+        paused.checkpoint_available = true;
+        assert_eq!(
+            validate_directory_batch_task_removal(&[paused])
+                .unwrap_err()
+                .code,
+            "DIRECTORY_BATCH_CHECKPOINTS_REMAIN"
+        );
+
+        let standalone = task("single", "a", QueueTaskState::Completed, 4);
+        let mut child = task("child", "a", QueueTaskState::Completed, 5);
+        child.batch_id = Some("directory-batch-safe".to_owned());
+        let remaining = without_batch_tasks(&[standalone.clone(), child], "directory-batch-safe");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].task_id, standalone.task_id);
     }
 }

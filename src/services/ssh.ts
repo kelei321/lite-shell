@@ -238,11 +238,15 @@ export type SftpDirectoryBatch = {
   backupPath?: string;
   taskIds: string[];
   fileCount: number;
+  transferCount: number;
+  skippedCount: number;
   completedCount: number;
   failedCount: number;
   cancelledCount: number;
   requiresCommit: boolean;
   requiresRollback: boolean;
+  enqueuePrepared: boolean;
+  ownsWriteDirectory: boolean;
   commitPhase: DirectoryCommitPhase;
   state: DirectoryBatchState;
   createdAt: number;
@@ -394,6 +398,7 @@ export const enqueueSftpDirectoryBatch = (
     localPath: string;
     remotePath: string;
     conflictStrategy: ConflictStrategy;
+    action: "transfer" | "skip";
   }>,
 ) => invoke<SftpDirectoryBatch>("sftp_batch_enqueue", { batchId, requests });
 

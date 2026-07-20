@@ -256,6 +256,9 @@ SFTP 后续工作统一维护在 [`plan.md`](./plan.md)。执行顺序为：
 - 队列、传输检查点和目录批次均先写临时文件，再使用 Windows `MoveFileExW` 原子替换；写盘失败不会提交对应内存快照。
 - 恢复远程批次只按后端验证的稳定 `server_id` 匹配当前会话，不信任旧 `session_id`。
 - 恢复或清理前会重新验证 replacement ID、目标与 staging/backup 的命名绑定、路径边界、方向和服务器身份。无法确定时进入 `rollback_required`，不会猜测性删除数据。
+- 每个扫描文件必须显式记录为 `transfer` 或 `skip`，并校验 `transfer + skip == scanned`；恢复时持久化 task ID 集合必须与队列完全一致。
+- 通用“清除已完成”不会删除目录批次子任务；删除安全结束的父批次会先原子清理其终态子任务，保留断点时拒绝删除。
+- replacement rollback 会先判定完整 target/staging/backup 状态矩阵再操作；backup 仅清理失败保持 `cleanup_pending`，不会错误提示恢复旧目录。
 
 ## 当前限制
 
@@ -266,6 +269,7 @@ SFTP 后续工作统一维护在 [`plan.md`](./plan.md)。执行顺序为：
 - PR1～PR9 的 SFTP 可靠性与交互改造已完成；双栏文件管理 PR2 仍需在真实窗口中验证快捷键、工具栏换行、类型列和窄窗口滚动。
 - 单次目录批次最多支持 5000 个文件；超过上限会在创建目标或 staging 前拒绝，不会部分入队。
 - 目录替换复制阶段不会改动原目录；最终 rename 窗口退出后，持久批次会检查 target/staging/backup 的真实状态并继续提交、回滚或提示 `rollback_required`。
+- `cleanup_pending` 表示新目录已经提交、仅待删除 backup，可重试清理；它不等同于 `rollback_required`。
 - 递归删除不是事务操作，中途失败时已经删除的文件无法自动恢复。
 - 端口转发和终端编码切换尚未实现。
 - 最新 SFTP 冲突策略、拖放、速度、ETA 和续传仍需要持续进行真实窗口和弱网场景验证。

@@ -61,6 +61,46 @@ pub(crate) enum DirectoryReplacement {
     },
 }
 
+pub(crate) fn local_replacement_intent(
+    target: &str,
+    replacement_id: &str,
+) -> Result<DirectoryReplacement, CommandError> {
+    validate_replacement_id(replacement_id)?;
+    let target = PathBuf::from(target.trim());
+    if !target.is_absolute() {
+        return Err(CommandError::new(
+            "LOCAL_DIRECTORY_INVALID",
+            "本地目录替换目标必须是绝对路径",
+        ));
+    }
+    Ok(DirectoryReplacement::Local {
+        staging: local_staging_path(&target, replacement_id)?,
+        backup: local_backup_path(&target, replacement_id)?,
+        target,
+    })
+}
+
+pub(crate) fn remote_replacement_intent(
+    server_id: &str,
+    target: &str,
+    replacement_id: &str,
+) -> Result<DirectoryReplacement, CommandError> {
+    validate_replacement_id(replacement_id)?;
+    let target = target.trim().trim_end_matches('/').to_owned();
+    if target.is_empty() || target == "/" {
+        return Err(CommandError::new(
+            "SFTP_DIRECTORY_INVALID",
+            "远程目录替换目标无效",
+        ));
+    }
+    Ok(DirectoryReplacement::Remote {
+        server_id: server_id.to_owned(),
+        staging: remote_staging_path(&target, replacement_id)?,
+        backup: remote_backup_path(&target, replacement_id)?,
+        target,
+    })
+}
+
 fn replacements_share_target(left: &DirectoryReplacement, right: &DirectoryReplacement) -> bool {
     match (left, right) {
         (
@@ -260,6 +300,100 @@ pub(crate) async fn finish_persisted_replacement(
             result
         }
     }
+}
+
+pub(crate) async fn persisted_replacement_has_artifacts(
+    manager: &SessionManager,
+    replacement_id: &str,
+    replacement: &DirectoryReplacement,
+    expected_server_id: &str,
+    session_id: Option<&str>,
+) -> Result<bool, CommandError> {
+    validate_persisted_replacement(replacement_id, replacement, expected_server_id)?;
+    match replacement {
+        DirectoryReplacement::Local {
+            staging, backup, ..
+        } => Ok(local_path_exists(staging).await? || local_path_exists(backup).await?),
+        DirectoryReplacement::Remote {
+            server_id,
+            staging,
+            backup,
+            ..
+        } => {
+            let session_id = session_id.ok_or_else(|| {
+                CommandError::new(
+                    "DIRECTORY_REPLACEMENT_SESSION_REQUIRED",
+                    "等待对应服务器重新连接后检查目录替换残留",
+                )
+            })?;
+            let current_server_id = session_server_id(manager, session_id).await?;
+            if &current_server_id != server_id || current_server_id != expected_server_id {
+                return Err(CommandError::new(
+                    "DIRECTORY_REPLACEMENT_SERVER_MISMATCH",
+                    "当前 SSH 会话与目录替换所属服务器不匹配",
+                ));
+            }
+            let sftp = open_sftp(manager, session_id).await?;
+            let staging_kind = remote_path_kind(&sftp, staging).await?;
+            let backup_kind = remote_path_kind(&sftp, backup).await?;
+            sftp.close().await.ok();
+            if !matches!(staging_kind, "missing" | "directory")
+                || !matches!(backup_kind, "missing" | "directory")
+            {
+                return Err(CommandError::new(
+                    "SFTP_DIRECTORY_REPLACEMENT_INVALID_STATE",
+                    "远程 staging 或 backup 类型异常",
+                ));
+            }
+            Ok(staging_kind == "directory" || backup_kind == "directory")
+        }
+    }
+}
+
+pub(crate) async fn remove_owned_local_directory(path: &str) -> Result<(), CommandError> {
+    let path = PathBuf::from(path.trim());
+    if !path.is_absolute() {
+        return Err(CommandError::new(
+            "LOCAL_DIRECTORY_INVALID",
+            "本地批次清理路径必须是绝对路径",
+        ));
+    }
+    remove_local_directory_recursive_safe(&path)
+        .await
+        .map_err(|error| CommandError::new("LOCAL_DIRECTORY_CLEANUP_FAILED", error.to_string()))
+}
+
+pub(crate) async fn remove_owned_remote_directory(
+    manager: &SessionManager,
+    expected_server_id: &str,
+    session_id: Option<&str>,
+    path: &str,
+) -> Result<(), CommandError> {
+    validate_remote_directory_path(path)?;
+    let session_id = session_id.ok_or_else(|| {
+        CommandError::new(
+            "DIRECTORY_REPLACEMENT_SESSION_REQUIRED",
+            "等待对应服务器重新连接后继续清理目录批次",
+        )
+    })?;
+    let current_server_id = session_server_id(manager, session_id).await?;
+    if current_server_id != expected_server_id {
+        return Err(CommandError::new(
+            "DIRECTORY_REPLACEMENT_SERVER_MISMATCH",
+            "当前 SSH 会话与目录批次所属服务器不匹配",
+        ));
+    }
+    let sftp = open_sftp(manager, session_id).await?;
+    let result = match remote_path_kind(&sftp, path).await? {
+        "missing" => Ok(()),
+        "directory" => remove_remote_directory_recursive(&sftp, path).await,
+        _ => Err(CommandError::new(
+            "SFTP_DIRECTORY_CLEANUP_INVALID_STATE",
+            "目录批次清理路径不是普通目录，已停止清理",
+        )),
+    };
+    sftp.close().await.ok();
+    result
 }
 
 #[tauri::command]
@@ -522,28 +656,15 @@ pub(crate) async fn finish_local_replacement(
     let backup_exists = local_path_exists(backup).await?;
 
     if !commit {
-        if staging_exists {
-            fs::remove_dir_all(staging).await.map_err(|error| {
-                CommandError::new("LOCAL_DIRECTORY_STAGING_DELETE_FAILED", error.to_string())
-            })?;
-        }
-        if backup_exists {
-            if target_exists {
-                fs::remove_dir_all(target).await.map_err(|error| {
-                    CommandError::new("LOCAL_DIRECTORY_ROLLBACK_DELETE_FAILED", error.to_string())
-                })?;
-            }
-            fs::rename(backup, target).await.map_err(|error| {
-                CommandError::new("LOCAL_DIRECTORY_RESTORE_FAILED", error.to_string())
-            })?;
-        }
-        if local_path_exists(target).await?
-            && !local_path_exists(staging).await?
-            && !local_path_exists(backup).await?
-        {
-            return Ok(());
-        }
-        return Ok(());
+        return rollback_local_replacement(
+            target,
+            staging,
+            backup,
+            target_exists,
+            staging_exists,
+            backup_exists,
+        )
+        .await;
     }
 
     if target_exists && !staging_exists && !backup_exists {
@@ -591,6 +712,85 @@ pub(crate) async fn finish_local_replacement(
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplacementRollbackAction {
+    Noop,
+    DropStaging,
+    RestoreBackup,
+    RestoreBackupThenDropStaging,
+    SwapBack,
+    Invalid,
+}
+
+fn replacement_rollback_action(
+    target_exists: bool,
+    staging_exists: bool,
+    backup_exists: bool,
+) -> ReplacementRollbackAction {
+    match (target_exists, staging_exists, backup_exists) {
+        (false, false, false) | (true, false, false) => ReplacementRollbackAction::Noop,
+        (true, true, false) => ReplacementRollbackAction::DropStaging,
+        (false, false, true) => ReplacementRollbackAction::RestoreBackup,
+        (false, true, true) => ReplacementRollbackAction::RestoreBackupThenDropStaging,
+        (true, false, true) => ReplacementRollbackAction::SwapBack,
+        _ => ReplacementRollbackAction::Invalid,
+    }
+}
+
+async fn rollback_local_replacement(
+    target: &Path,
+    staging: &Path,
+    backup: &Path,
+    target_exists: bool,
+    staging_exists: bool,
+    backup_exists: bool,
+) -> Result<(), CommandError> {
+    match replacement_rollback_action(target_exists, staging_exists, backup_exists) {
+        ReplacementRollbackAction::Noop => Ok(()),
+        ReplacementRollbackAction::DropStaging => {
+            fs::remove_dir_all(staging).await.map_err(|error| {
+                CommandError::new("LOCAL_DIRECTORY_STAGING_DELETE_FAILED", error.to_string())
+            })
+        }
+        ReplacementRollbackAction::RestoreBackup => {
+            fs::rename(backup, target).await.map_err(|error| {
+                CommandError::new("LOCAL_DIRECTORY_RESTORE_FAILED", error.to_string())
+            })
+        }
+        ReplacementRollbackAction::RestoreBackupThenDropStaging => {
+            fs::rename(backup, target).await.map_err(|error| {
+                CommandError::new("LOCAL_DIRECTORY_RESTORE_FAILED", error.to_string())
+            })?;
+            fs::remove_dir_all(staging).await.map_err(|error| {
+                CommandError::new("LOCAL_DIRECTORY_STAGING_DELETE_FAILED", error.to_string())
+            })
+        }
+        ReplacementRollbackAction::SwapBack => {
+            fs::rename(target, staging).await.map_err(|error| {
+                CommandError::new("LOCAL_DIRECTORY_ROLLBACK_MOVE_FAILED", error.to_string())
+            })?;
+            if let Err(error) = fs::rename(backup, target).await {
+                let restored = fs::rename(staging, target).await;
+                return Err(if restored.is_ok() {
+                    CommandError::new("LOCAL_DIRECTORY_RESTORE_FAILED", error.to_string())
+                } else {
+                    CommandError::new(
+                        "LOCAL_DIRECTORY_RESTORE_FAILED",
+                        "恢复原目录失败，且无法将新目录移回目标；staging 与 backup 均已保留",
+                    )
+                });
+            }
+            fs::remove_dir_all(staging).await.map_err(|error| {
+                CommandError::new("LOCAL_DIRECTORY_STAGING_DELETE_FAILED", error.to_string())
+            })
+        }
+        ReplacementRollbackAction::Invalid => Err(CommandError::new(
+            "LOCAL_DIRECTORY_ROLLBACK_INVALID_STATE",
+            "目录回滚状态存在歧义，未修改 target、staging 或 backup",
+        )),
+    }
+}
+
 pub(crate) async fn finish_remote_replacement(
     sftp: &SftpSession,
     target: &str,
@@ -603,34 +803,16 @@ pub(crate) async fn finish_remote_replacement(
     let backup_kind = remote_path_kind(sftp, backup).await?;
 
     if !commit {
-        if staging_kind == "directory" {
-            remove_remote_directory_recursive(sftp, staging).await?;
-        } else if staging_kind != "missing" {
-            return Err(CommandError::new(
-                "SFTP_DIRECTORY_STAGING_INVALID",
-                "远程替换临时路径不是目录，已停止清理",
-            ));
-        }
-        if backup_kind == "directory" {
-            if target_kind == "directory" {
-                remove_remote_directory_recursive(sftp, target).await?;
-            } else if target_kind != "missing" {
-                return Err(CommandError::new(
-                    "SFTP_DIRECTORY_REPLACEMENT_INVALID_STATE",
-                    "远程目标路径类型异常，无法恢复原目录",
-                ));
-            }
-            sftp.rename(backup.to_owned(), target.to_owned())
-                .await
-                .map_err(sftp_error("SFTP_DIRECTORY_RESTORE_FAILED"))?;
-        }
-        if remote_path_kind(sftp, target).await? == "directory"
-            && remote_path_kind(sftp, staging).await? == "missing"
-            && remote_path_kind(sftp, backup).await? == "missing"
-        {
-            return Ok(());
-        }
-        return Ok(());
+        return rollback_remote_replacement(
+            sftp,
+            target,
+            staging,
+            backup,
+            target_kind,
+            staging_kind,
+            backup_kind,
+        )
+        .await;
     }
 
     if target_kind == "directory" && staging_kind == "missing" && backup_kind == "missing" {
@@ -667,7 +849,11 @@ pub(crate) async fn finish_remote_replacement(
         && remote_path_kind(sftp, staging).await? == "missing"
         && remote_path_kind(sftp, backup).await? == "directory"
     {
-        remove_remote_directory_recursive(sftp, backup).await?;
+        remove_remote_directory_recursive(sftp, backup)
+            .await
+            .map_err(|error| {
+                CommandError::new("SFTP_DIRECTORY_BACKUP_DELETE_FAILED", error.message)
+            })?;
         return Ok(());
     }
     Err(CommandError::new(
@@ -1041,6 +1227,68 @@ fn sftp_error(code: &'static str) -> impl FnOnce(SftpClientError) -> CommandErro
     }
 }
 
+async fn rollback_remote_replacement(
+    sftp: &SftpSession,
+    target: &str,
+    staging: &str,
+    backup: &str,
+    target_kind: &str,
+    staging_kind: &str,
+    backup_kind: &str,
+) -> Result<(), CommandError> {
+    if !matches!(target_kind, "missing" | "directory")
+        || !matches!(staging_kind, "missing" | "directory")
+        || !matches!(backup_kind, "missing" | "directory")
+    {
+        return Err(CommandError::new(
+            "SFTP_DIRECTORY_ROLLBACK_INVALID_STATE",
+            "远程目录回滚路径类型异常，未执行任何清理",
+        ));
+    }
+    let state = (
+        target_kind == "directory",
+        staging_kind == "directory",
+        backup_kind == "directory",
+    );
+    match replacement_rollback_action(state.0, state.1, state.2) {
+        ReplacementRollbackAction::Noop => Ok(()),
+        ReplacementRollbackAction::DropStaging => {
+            remove_remote_directory_recursive(sftp, staging).await
+        }
+        ReplacementRollbackAction::RestoreBackup => sftp
+            .rename(backup.to_owned(), target.to_owned())
+            .await
+            .map_err(sftp_error("SFTP_DIRECTORY_RESTORE_FAILED")),
+        ReplacementRollbackAction::RestoreBackupThenDropStaging => {
+            sftp.rename(backup.to_owned(), target.to_owned())
+                .await
+                .map_err(sftp_error("SFTP_DIRECTORY_RESTORE_FAILED"))?;
+            remove_remote_directory_recursive(sftp, staging).await
+        }
+        ReplacementRollbackAction::SwapBack => {
+            sftp.rename(target.to_owned(), staging.to_owned())
+                .await
+                .map_err(sftp_error("SFTP_DIRECTORY_ROLLBACK_MOVE_FAILED"))?;
+            if let Err(error) = sftp.rename(backup.to_owned(), target.to_owned()).await {
+                let restored = sftp.rename(staging.to_owned(), target.to_owned()).await;
+                return Err(if restored.is_ok() {
+                    sftp_error("SFTP_DIRECTORY_RESTORE_FAILED")(error)
+                } else {
+                    CommandError::new(
+                        "SFTP_DIRECTORY_RESTORE_FAILED",
+                        "恢复远程原目录失败，且无法将新目录移回目标；staging 与 backup 均已保留",
+                    )
+                });
+            }
+            remove_remote_directory_recursive(sftp, staging).await
+        }
+        ReplacementRollbackAction::Invalid => Err(CommandError::new(
+            "SFTP_DIRECTORY_ROLLBACK_INVALID_STATE",
+            "远程目录回滚状态存在歧义，未修改 target、staging 或 backup",
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1269,6 +1517,125 @@ mod tests {
             .await
             .unwrap();
         fs::remove_dir_all(target).await.unwrap();
+    }
+
+    #[test]
+    fn rollback_matrix_classifies_every_local_and_remote_state() {
+        use ReplacementRollbackAction::*;
+        let cases = [
+            ((false, false, false), Noop),
+            ((true, false, false), Noop),
+            ((true, true, false), DropStaging),
+            ((false, false, true), RestoreBackup),
+            ((false, true, true), RestoreBackupThenDropStaging),
+            ((true, false, true), SwapBack),
+            ((false, true, false), Invalid),
+            ((true, true, true), Invalid),
+        ];
+        for ((target, staging, backup), expected) in cases {
+            assert_eq!(
+                replacement_rollback_action(target, staging, backup),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn local_rollback_rejects_ambiguous_states_without_deleting_data() {
+        let target = test_path("rollback-ambiguous-missing-target");
+        let staging = local_staging_path(&target, "rollback-ambiguous").unwrap();
+        let backup = local_backup_path(&target, "rollback-ambiguous").unwrap();
+        fs::create_dir_all(&staging).await.unwrap();
+        fs::write(staging.join("only-copy.txt"), b"new")
+            .await
+            .unwrap();
+        let error = finish_local_replacement(&target, &staging, &backup, false)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "LOCAL_DIRECTORY_ROLLBACK_INVALID_STATE");
+        assert!(staging.join("only-copy.txt").is_file());
+        fs::remove_dir_all(&staging).await.unwrap();
+
+        fs::create_dir_all(&target).await.unwrap();
+        fs::create_dir_all(&staging).await.unwrap();
+        fs::create_dir_all(&backup).await.unwrap();
+        fs::write(target.join("target.txt"), b"target")
+            .await
+            .unwrap();
+        fs::write(staging.join("staging.txt"), b"staging")
+            .await
+            .unwrap();
+        fs::write(backup.join("backup.txt"), b"backup")
+            .await
+            .unwrap();
+        finish_local_replacement(&target, &staging, &backup, false)
+            .await
+            .unwrap_err();
+        assert!(target.join("target.txt").is_file());
+        assert!(staging.join("staging.txt").is_file());
+        assert!(backup.join("backup.txt").is_file());
+        fs::remove_dir_all(target).await.unwrap();
+        fs::remove_dir_all(staging).await.unwrap();
+        fs::remove_dir_all(backup).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persisted_intent_rolls_back_after_prepare_before_parent_update() {
+        let target = test_path("persisted-intent");
+        fs::create_dir_all(&target).await.unwrap();
+        fs::write(target.join("old.txt"), b"old").await.unwrap();
+        let replacement =
+            local_replacement_intent(&target.to_string_lossy(), "persisted-intent-replacement")
+                .unwrap();
+        let DirectoryReplacement::Local {
+            target,
+            staging,
+            backup,
+        } = replacement
+        else {
+            panic!("expected local replacement");
+        };
+        fs::create_dir_all(&staging).await.unwrap();
+        fs::write(staging.join("new.txt"), b"new").await.unwrap();
+
+        finish_local_replacement(&target, &staging, &backup, false)
+            .await
+            .unwrap();
+        assert!(target.join("old.txt").is_file());
+        assert!(!staging.exists());
+        fs::remove_dir_all(target).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn replacement_intent_distinguishes_no_change_from_created_staging() {
+        let target = test_path("artifact-detection");
+        let replacement_id = "artifact-detection-replacement";
+        let replacement =
+            local_replacement_intent(&target.to_string_lossy(), replacement_id).unwrap();
+        let sessions = SessionManager::default();
+        assert!(!persisted_replacement_has_artifacts(
+            &sessions,
+            replacement_id,
+            &replacement,
+            "server",
+            None,
+        )
+        .await
+        .unwrap());
+        let DirectoryReplacement::Local { staging, .. } = &replacement else {
+            panic!("expected local replacement");
+        };
+        fs::create_dir_all(staging).await.unwrap();
+        assert!(persisted_replacement_has_artifacts(
+            &sessions,
+            replacement_id,
+            &replacement,
+            "server",
+            None,
+        )
+        .await
+        .unwrap());
+        fs::remove_dir_all(staging).await.unwrap();
     }
 
     #[tokio::test]

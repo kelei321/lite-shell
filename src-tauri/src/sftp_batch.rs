@@ -16,15 +16,18 @@ use crate::{
     atomic_file::atomic_write,
     sftp::{ConflictStrategy, SftpTransferManager},
     sftp_directory::{
-        finish_persisted_replacement, prepare_local_directory, prepare_remote_directory,
+        finish_persisted_replacement, local_replacement_intent,
+        persisted_replacement_has_artifacts, prepare_local_directory, prepare_remote_directory,
+        remote_replacement_intent, remove_owned_local_directory, remove_owned_remote_directory,
         validate_persisted_replacement, DirectoryConflictStrategy, DirectoryReplacement,
         DirectoryReplacementManager,
     },
     sftp_queue::{
         cancel_directory_batch_tasks, enqueue_directory_batch, ensure_queue_capacity,
-        ensure_queue_ready, pause_directory_batch_tasks, resume_directory_batch_tasks,
-        retry_directory_batch_tasks, tasks_for_batch, wake_queue, EnqueueTransferRequest,
-        QueueDirection, QueueTaskState, SftpTransferQueue, TransferQueueTask,
+        ensure_queue_ready, pause_directory_batch_tasks, remove_directory_batch_tasks,
+        resume_directory_batch_tasks, retry_directory_batch_tasks, tasks_for_batch, wake_queue,
+        EnqueueTransferRequest, QueueDirection, QueueTaskState, SftpTransferQueue,
+        TransferQueueTask,
     },
     ssh::{matching_session_id, open_sftp, session_server_id, CommandError, SessionManager},
 };
@@ -69,6 +72,23 @@ pub enum DirectoryCommitPhase {
     RolledBack,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitFailureDisposition {
+    WaitForSession,
+    RetryCleanup,
+    RequireRollback,
+}
+
+fn classify_commit_failure(code: &str) -> CommitFailureDisposition {
+    match code {
+        "DIRECTORY_REPLACEMENT_SESSION_REQUIRED" => CommitFailureDisposition::WaitForSession,
+        "LOCAL_DIRECTORY_BACKUP_DELETE_FAILED" | "SFTP_DIRECTORY_BACKUP_DELETE_FAILED" => {
+            CommitFailureDisposition::RetryCleanup
+        }
+        _ => CommitFailureDisposition::RequireRollback,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SftpDirectoryBatch {
@@ -89,6 +109,10 @@ pub struct SftpDirectoryBatch {
     backup_path: Option<String>,
     task_ids: Vec<String>,
     file_count: usize,
+    #[serde(default)]
+    transfer_count: usize,
+    #[serde(default)]
+    skipped_count: usize,
     completed_count: usize,
     failed_count: usize,
     cancelled_count: usize,
@@ -96,6 +120,10 @@ pub struct SftpDirectoryBatch {
     requires_rollback: bool,
     #[serde(default)]
     cleanup_on_cancel: bool,
+    #[serde(default)]
+    enqueue_prepared: bool,
+    #[serde(default)]
+    owns_write_directory: bool,
     commit_phase: DirectoryCommitPhase,
     state: DirectoryBatchState,
     created_at: u64,
@@ -124,12 +152,20 @@ pub struct CreateDirectoryBatchRequest {
     file_count: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryBatchFileRequest {
     local_path: String,
     remote_path: String,
     conflict_strategy: ConflictStrategy,
+    action: DirectoryBatchFileAction,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectoryBatchFileAction {
+    Transfer,
+    Skip,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -193,6 +229,22 @@ pub async fn sftp_batch_create(
     let batch_id = new_id("directory-batch");
     let replacement_id = (request.conflict_strategy == DirectoryConflictStrategy::Replace)
         .then(|| new_id("directory-replacement"));
+    let replacement = match replacement_id.as_deref() {
+        Some(replacement_id) => Some(match request.direction {
+            QueueDirection::Upload => {
+                remote_replacement_intent(&server_id, &request.target_directory, replacement_id)?
+            }
+            QueueDirection::Download => {
+                local_replacement_intent(&request.target_directory, replacement_id)?
+            }
+        }),
+        None => None,
+    };
+    let (staging_path, backup_path) = replacement
+        .as_ref()
+        .map(replacement_paths)
+        .map(|(staging, backup)| (Some(staging), Some(backup)))
+        .unwrap_or((None, None));
     let now = unix_now();
     let mut batch = SftpDirectoryBatch {
         version: BATCH_STORE_VERSION,
@@ -207,17 +259,21 @@ pub async fn sftp_batch_create(
         write_directory: request.target_directory.trim().to_owned(),
         conflict_strategy: request.conflict_strategy,
         replacement_id: replacement_id.clone(),
-        replacement: None,
-        staging_path: None,
-        backup_path: None,
+        replacement,
+        staging_path,
+        backup_path,
         task_ids: Vec::new(),
         file_count: request.file_count,
+        transfer_count: 0,
+        skipped_count: 0,
         completed_count: 0,
         failed_count: 0,
         cancelled_count: 0,
         requires_commit: false,
         requires_rollback: false,
         cleanup_on_cancel: false,
+        enqueue_prepared: false,
+        owns_write_directory: false,
         commit_phase: DirectoryCommitPhase::Prepared,
         state: DirectoryBatchState::Preparing,
         created_at: now,
@@ -238,12 +294,31 @@ pub async fn sftp_batch_create(
     {
         Ok(prepared) => prepared,
         Err(error) => {
+            let requires_rollback =
+                match (batch.replacement_id.as_deref(), batch.replacement.as_ref()) {
+                    (Some(replacement_id), Some(replacement)) => {
+                        persisted_replacement_has_artifacts(
+                            &sessions,
+                            replacement_id,
+                            replacement,
+                            &server_id,
+                            Some(&request.session_id),
+                        )
+                        .await
+                        .unwrap_or(true)
+                    }
+                    _ => false,
+                };
             let failed = mark_batch_error(
                 &app,
                 &batches,
                 &batch_id,
-                DirectoryBatchState::RollbackRequired,
-                true,
+                if requires_rollback {
+                    DirectoryBatchState::RollbackRequired
+                } else {
+                    DirectoryBatchState::Failed
+                },
+                requires_rollback,
                 error.message.clone(),
             )
             .await?;
@@ -253,6 +328,9 @@ pub async fn sftp_batch_create(
     };
 
     batch.write_directory = prepared.path.clone();
+    batch.owns_write_directory = prepared.replacement_id.is_none()
+        && !prepared.skipped
+        && (!prepared.existed || request.conflict_strategy == DirectoryConflictStrategy::Rename);
     batch.replacement_id = prepared.replacement_id.clone();
     batch.requires_commit = prepared.replacement_id.is_some();
     if let Some(replacement_id) = prepared.replacement_id.as_deref() {
@@ -262,6 +340,10 @@ pub async fn sftp_batch_create(
         batch.staging_path = Some(staging);
         batch.backup_path = Some(backup);
         batch.replacement = Some(replacement);
+    } else {
+        batch.replacement = None;
+        batch.staging_path = None;
+        batch.backup_path = None;
     }
     if prepared.skipped {
         batch.state = DirectoryBatchState::Completed;
@@ -281,12 +363,17 @@ pub async fn sftp_batch_create(
         )
         .await
         {
+            let requires_rollback = batch.replacement.is_some() || batch.owns_write_directory;
             let failed = mark_batch_error(
                 &app,
                 &batches,
                 &batch_id,
-                DirectoryBatchState::RollbackRequired,
-                true,
+                if requires_rollback {
+                    DirectoryBatchState::RollbackRequired
+                } else {
+                    DirectoryBatchState::Failed
+                },
+                requires_rollback,
                 error.message.clone(),
             )
             .await?;
@@ -315,12 +402,7 @@ pub async fn sftp_batch_enqueue(
             "只有准备中的目录批次可以批量入队",
         ));
     }
-    if requests.len() > batch.file_count {
-        return Err(CommandError::new(
-            "DIRECTORY_BATCH_FILE_COUNT_MISMATCH",
-            "目录批次入队文件数量超过安全扫描结果",
-        ));
-    }
+    let (transfer_count, skipped_count) = file_action_counts(batch.file_count, &requests)?;
     let session_id = matching_session_id(&sessions, &batch.server_id)
         .await
         .ok_or_else(|| {
@@ -330,34 +412,64 @@ pub async fn sftp_batch_enqueue(
             )
         })?;
     let mut queue_requests = Vec::with_capacity(requests.len());
+    let mut unique_files = HashSet::with_capacity(requests.len());
     for request in requests {
         validate_batch_file_request(&batch, &request)?;
-        queue_requests.push(EnqueueTransferRequest {
-            session_id: session_id.clone(),
-            server_label: batch.server_label.clone(),
-            direction: batch.direction,
-            local_path: request.local_path,
-            remote_path: request.remote_path,
-            conflict_strategy: request.conflict_strategy,
-            allow_pause: false,
-        });
+        let key = batch_file_key(&batch, &request)?;
+        if !unique_files.insert(key) {
+            return Err(CommandError::new(
+                "DIRECTORY_BATCH_DUPLICATE_FILE",
+                "目录批次包含重复文件动作",
+            ));
+        }
+        match request.action {
+            DirectoryBatchFileAction::Transfer => {
+                queue_requests.push(EnqueueTransferRequest {
+                    session_id: session_id.clone(),
+                    server_label: batch.server_label.clone(),
+                    direction: batch.direction,
+                    local_path: request.local_path,
+                    remote_path: request.remote_path,
+                    conflict_strategy: request.conflict_strategy,
+                    allow_pause: false,
+                });
+            }
+            DirectoryBatchFileAction::Skip => {}
+        }
     }
+    debug_assert_eq!(queue_requests.len(), transfer_count);
+    let mut enqueue_prepared = batch.clone();
+    enqueue_prepared.transfer_count = queue_requests.len();
+    enqueue_prepared.skipped_count = skipped_count;
+    enqueue_prepared.enqueue_prepared = true;
+    enqueue_prepared.updated_at = unix_now();
+    replace_batch(&app, &batches, enqueue_prepared.clone()).await?;
     let tasks = if queue_requests.is_empty() {
         Vec::new()
     } else {
         enqueue_directory_batch(&app, &queue, &sessions, &batch.batch_id, queue_requests).await?
     };
-    let mut queued = batch;
-    queued.file_count = tasks.len();
+    let mut queued = enqueue_prepared;
     queued.task_ids = tasks.iter().map(|task| task.task_id().to_owned()).collect();
     queued.session_id = Some(session_id);
-    queued.state = if tasks.is_empty() {
+    queued.state = if queued.transfer_count == 0 {
         DirectoryBatchState::Committing
     } else {
         DirectoryBatchState::Queued
     };
     queued.updated_at = unix_now();
-    replace_batch(&app, &batches, queued.clone()).await?;
+    if let Err(error) = replace_batch(&app, &batches, queued.clone()).await {
+        reconcile_batch(&app, &queued.batch_id).await;
+        if let Ok(recovered) = get_batch(&batches, &queued.batch_id).await {
+            if recovered.state != DirectoryBatchState::Preparing
+                && recovered.state != DirectoryBatchState::RollbackRequired
+            {
+                wake_queue(&queue);
+                return Ok(recovered);
+            }
+        }
+        return Err(error);
+    }
     emit_batch(&app, &queued);
     wake_queue(&queue);
     if tasks.is_empty() {
@@ -370,40 +482,69 @@ pub async fn sftp_batch_enqueue(
 pub async fn sftp_batch_rollback(
     app: AppHandle,
     batches: State<'_, SftpDirectoryBatchManager>,
+    queue: State<'_, SftpTransferQueue>,
     sessions: State<'_, SessionManager>,
     replacements: State<'_, DirectoryReplacementManager>,
     batch_id: String,
 ) -> Result<SftpDirectoryBatch, CommandError> {
     ensure_initialized(&app, &batches).await?;
-    rollback_batch_internal(&app, &batches, &sessions, &replacements, &batch_id).await
+    rollback_batch_internal(&app, &batches, &queue, &sessions, &replacements, &batch_id).await
 }
 
 async fn rollback_batch_internal(
     app: &AppHandle,
     batches: &SftpDirectoryBatchManager,
+    queue: &SftpTransferQueue,
     sessions: &SessionManager,
     replacements: &DirectoryReplacementManager,
     batch_id: &str,
 ) -> Result<SftpDirectoryBatch, CommandError> {
     let mut batch = get_batch(batches, batch_id).await?;
+    let child_tasks = tasks_for_batch(app, queue, batch_id).await?;
     if matches!(
         batch.state,
         DirectoryBatchState::Queued
             | DirectoryBatchState::Running
             | DirectoryBatchState::Paused
             | DirectoryBatchState::Committing
-    ) {
+    ) || child_tasks.iter().any(|task| {
+        !matches!(
+            task.state(),
+            QueueTaskState::Completed | QueueTaskState::Failed | QueueTaskState::Cancelled
+        )
+    }) {
         return Err(CommandError::new(
             "DIRECTORY_BATCH_ROLLBACK_BUSY",
             "请先取消目录批次中的传输任务，再执行回滚",
         ));
     }
     let Some(replacement) = batch.replacement.clone() else {
-        batch.state = DirectoryBatchState::RollbackRequired;
-        batch.requires_rollback = true;
-        batch.last_error = Some(
-            "该批次使用合并或重命名策略，无法证明删除现有内容安全，请人工检查目标目录".to_owned(),
-        );
+        if batch.owns_write_directory {
+            validate_owned_write_directory(&batch)?;
+            let session_id = matching_session_id(sessions, &batch.server_id).await;
+            match batch.direction {
+                QueueDirection::Upload => {
+                    remove_owned_remote_directory(
+                        sessions,
+                        &batch.server_id,
+                        session_id.as_deref(),
+                        &batch.write_directory,
+                    )
+                    .await?;
+                }
+                QueueDirection::Download => {
+                    remove_owned_local_directory(&batch.write_directory).await?;
+                }
+            }
+        }
+        batch.state = DirectoryBatchState::Cancelled;
+        batch.requires_commit = false;
+        batch.requires_rollback = false;
+        batch.cleanup_on_cancel = false;
+        batch.commit_phase = DirectoryCommitPhase::RolledBack;
+        batch.last_error = (!batch.owns_write_directory).then(|| {
+            "该批次写入了既有目录；记录已解锁，现有目录内容未自动删除，请人工检查".to_owned()
+        });
         batch.updated_at = unix_now();
         replace_batch(app, batches, batch.clone()).await?;
         emit_batch(app, &batch);
@@ -443,6 +584,7 @@ async fn rollback_batch_internal(
 pub async fn sftp_batch_delete(
     app: AppHandle,
     batches: State<'_, SftpDirectoryBatchManager>,
+    queue: State<'_, SftpTransferQueue>,
     batch_id: String,
 ) -> Result<(), CommandError> {
     ensure_initialized(&app, &batches).await?;
@@ -453,6 +595,8 @@ pub async fn sftp_batch_delete(
             "目录批次尚未安全结束，不能删除恢复记录",
         ));
     }
+    ensure_queue_ready(&app, &queue).await?;
+    remove_directory_batch_tasks(&app, &queue, &batch_id).await?;
     remove_batch(&app, &batches, &batch_id).await
 }
 
@@ -531,10 +675,17 @@ pub async fn sftp_batch_retry(
 ) -> Result<SftpDirectoryBatch, CommandError> {
     ensure_initialized(&app, &batches).await?;
     let mut batch = get_batch(&batches, &batch_id).await?;
+    if batch.state == DirectoryBatchState::Committing
+        && batch.commit_phase == DirectoryCommitPhase::CleanupPending
+    {
+        try_commit_batch(&app, &batch_id).await;
+        return get_batch(&batches, &batch_id).await;
+    }
     if !matches!(
         batch.state,
         DirectoryBatchState::Failed | DirectoryBatchState::Cancelled
     ) || batch.commit_phase == DirectoryCommitPhase::RolledBack
+        || !batch.enqueue_prepared
     {
         return Err(CommandError::new(
             "DIRECTORY_BATCH_RETRY_INVALID_STATE",
@@ -564,10 +715,7 @@ pub async fn sftp_batch_cancel(
 ) -> Result<SftpDirectoryBatch, CommandError> {
     ensure_initialized(&app, &batches).await?;
     let mut batch = get_batch(&batches, &batch_id).await?;
-    if matches!(
-        batch.state,
-        DirectoryBatchState::Completed | DirectoryBatchState::RollbackRequired
-    ) {
+    if matches!(batch.state, DirectoryBatchState::Completed) {
         return Err(CommandError::new(
             "DIRECTORY_BATCH_CANCEL_INVALID_STATE",
             "当前目录批次状态不能取消",
@@ -608,19 +756,22 @@ pub async fn initialize_directory_batches(app: AppHandle) {
         .collect::<Vec<_>>();
     for batch_id in ids {
         let current = get_batch(&batches, &batch_id).await.ok();
-        let tasks = tasks_for_batch(&app, &queue, &batch_id)
-            .await
-            .unwrap_or_default();
-        if current
-            .as_ref()
-            .is_some_and(|batch| batch.state == DirectoryBatchState::Preparing && tasks.is_empty())
-        {
+        if current.as_ref().is_some_and(|batch| {
+            batch.state == DirectoryBatchState::Preparing && !batch.enqueue_prepared
+        }) {
+            let requires_rollback = current
+                .as_ref()
+                .is_some_and(|batch| batch.replacement.is_some() || batch.owns_write_directory);
             if let Ok(batch) = mark_batch_error(
                 &app,
                 &batches,
                 &batch_id,
-                DirectoryBatchState::RollbackRequired,
-                true,
+                if requires_rollback {
+                    DirectoryBatchState::RollbackRequired
+                } else {
+                    DirectoryBatchState::Failed
+                },
+                requires_rollback,
                 "应用在目录批次准备阶段退出，需要检查并回滚临时目录".to_owned(),
             )
             .await
@@ -721,7 +872,12 @@ async fn reconcile_batch(app: &AppHandle, batch_id: &str) {
     let Ok(mut batch) = get_batch(&batches, batch_id).await else {
         return;
     };
-    if batch.state == DirectoryBatchState::Completed {
+    if batch.state == DirectoryBatchState::Completed
+        || (batch.state == DirectoryBatchState::Cancelled
+            && !batch.requires_commit
+            && !batch.requires_rollback)
+        || (batch.state == DirectoryBatchState::Failed && !batch.enqueue_prepared)
+    {
         return;
     }
     let queue = app.state::<SftpTransferQueue>();
@@ -739,8 +895,15 @@ async fn reconcile_batch(app: &AppHandle, batch_id: &str) {
         }
         return;
     }
-    if !tasks.is_empty() {
-        batch.task_ids = tasks.iter().map(|task| task.task_id().to_owned()).collect();
+    if let Err(error) = validate_or_adopt_task_set(&mut batch, &tasks) {
+        batch.state = DirectoryBatchState::RollbackRequired;
+        batch.requires_rollback = true;
+        batch.last_error = Some(error.message);
+        batch.updated_at = unix_now();
+        if replace_batch(app, &batches, batch.clone()).await.is_ok() {
+            emit_batch(app, &batch);
+        }
+        return;
     }
     batch.session_id = matching_session_id(&app.state::<SessionManager>(), &batch.server_id).await;
     update_counts(&mut batch, &tasks);
@@ -767,8 +930,15 @@ async fn reconcile_batch(app: &AppHandle, batch_id: &str) {
     if batch.state == DirectoryBatchState::Cancelled && batch.cleanup_on_cancel {
         let sessions = app.state::<SessionManager>();
         let replacements = app.state::<DirectoryReplacementManager>();
-        let _ =
-            rollback_batch_internal(app, &batches, &sessions, &replacements, &batch.batch_id).await;
+        let _ = rollback_batch_internal(
+            app,
+            &batches,
+            &queue,
+            &sessions,
+            &replacements,
+            &batch.batch_id,
+        )
+        .await;
         return;
     }
     if should_commit {
@@ -785,11 +955,11 @@ fn derive_batch_state(
     {
         return batch.state;
     }
-    if batch.file_count == 0
-        || (!tasks.is_empty()
-            && tasks
-                .iter()
-                .all(|task| task.state() == QueueTaskState::Completed))
+    if batch.enqueue_prepared
+        && batch.transfer_count == tasks.len()
+        && tasks
+            .iter()
+            .all(|task| task.state() == QueueTaskState::Completed)
     {
         return DirectoryBatchState::Committing;
     }
@@ -820,6 +990,44 @@ fn derive_batch_state(
         return DirectoryBatchState::Running;
     }
     DirectoryBatchState::Queued
+}
+
+fn validate_or_adopt_task_set(
+    batch: &mut SftpDirectoryBatch,
+    tasks: &[TransferQueueTask],
+) -> Result<(), CommandError> {
+    if !batch.enqueue_prepared
+        || batch.file_count != batch.transfer_count.saturating_add(batch.skipped_count)
+        || tasks.len() != batch.transfer_count
+    {
+        return Err(CommandError::new(
+            "DIRECTORY_BATCH_TASK_SET_INCOMPLETE",
+            "目录批次的扫描、传输、跳过数量或实际子任务数量不一致，已禁止自动提交",
+        ));
+    }
+    let actual = tasks
+        .iter()
+        .map(|task| task.task_id().to_owned())
+        .collect::<HashSet<_>>();
+    if actual.len() != tasks.len() {
+        return Err(CommandError::new(
+            "DIRECTORY_BATCH_TASK_SET_INCOMPLETE",
+            "目录批次队列包含重复子任务 ID，已禁止自动提交",
+        ));
+    }
+    if batch.state == DirectoryBatchState::Preparing && batch.task_ids.is_empty() {
+        batch.task_ids = actual.into_iter().collect();
+        batch.task_ids.sort();
+        return Ok(());
+    }
+    let expected = batch.task_ids.iter().cloned().collect::<HashSet<_>>();
+    if expected.len() != batch.task_ids.len() || expected != actual {
+        return Err(CommandError::new(
+            "DIRECTORY_BATCH_TASK_SET_INCOMPLETE",
+            "目录批次持久化的子任务 ID 集合与队列不一致，已禁止自动提交",
+        ));
+    }
+    Ok(())
 }
 
 async fn try_commit_batch(app: &AppHandle, batch_id: &str) {
@@ -857,12 +1065,21 @@ async fn try_commit_batch(app: &AppHandle, batch_id: &str) {
         {
             batch.last_error = Some(error.message);
             batch.updated_at = unix_now();
-            if error.code == "DIRECTORY_REPLACEMENT_SESSION_REQUIRED" {
-                batch.state = DirectoryBatchState::Committing;
-            } else {
-                batch.state = DirectoryBatchState::RollbackRequired;
-                batch.requires_rollback = true;
-                batch.commit_phase = DirectoryCommitPhase::CleanupPending;
+            match classify_commit_failure(error.code) {
+                CommitFailureDisposition::WaitForSession => {
+                    batch.state = DirectoryBatchState::Committing;
+                    batch.requires_rollback = false;
+                }
+                CommitFailureDisposition::RetryCleanup => {
+                    batch.state = DirectoryBatchState::Committing;
+                    batch.requires_rollback = false;
+                    batch.commit_phase = DirectoryCommitPhase::CleanupPending;
+                }
+                CommitFailureDisposition::RequireRollback => {
+                    batch.state = DirectoryBatchState::RollbackRequired;
+                    batch.requires_rollback = true;
+                    batch.commit_phase = DirectoryCommitPhase::RollbackPending;
+                }
             }
             if replace_batch(app, &batches, batch.clone()).await.is_ok() {
                 emit_batch(app, &batch);
@@ -1041,16 +1258,15 @@ async fn insert_batch(
     }
     let mut next = inner.clone();
     next.push(batch);
-    persist_store(
+    let persist_result = persist_store(
         app,
         &DirectoryBatchStore {
             version: BATCH_STORE_VERSION,
             batches: next.clone(),
         },
     )
-    .await?;
-    *inner = next;
-    Ok(())
+    .await;
+    install_persisted_batches(&mut inner, next, persist_result)
 }
 
 async fn replace_batch(
@@ -1066,16 +1282,15 @@ async fn replace_batch(
         .ok_or_else(|| CommandError::new("DIRECTORY_BATCH_NOT_FOUND", "目录批次不存在"))?;
     let mut next = inner.clone();
     next[index] = batch;
-    persist_store(
+    let persist_result = persist_store(
         app,
         &DirectoryBatchStore {
             version: BATCH_STORE_VERSION,
             batches: next.clone(),
         },
     )
-    .await?;
-    *inner = next;
-    Ok(())
+    .await;
+    install_persisted_batches(&mut inner, next, persist_result)
 }
 
 async fn remove_batch(
@@ -1087,15 +1302,24 @@ async fn remove_batch(
     let mut inner = batches.inner.lock().await;
     let mut next = inner.clone();
     next.retain(|batch| batch.batch_id != batch_id);
-    persist_store(
+    let persist_result = persist_store(
         app,
         &DirectoryBatchStore {
             version: BATCH_STORE_VERSION,
             batches: next.clone(),
         },
     )
-    .await?;
-    *inner = next;
+    .await;
+    install_persisted_batches(&mut inner, next, persist_result)
+}
+
+fn install_persisted_batches(
+    current: &mut Vec<SftpDirectoryBatch>,
+    next: Vec<SftpDirectoryBatch>,
+    persist_result: Result<(), CommandError>,
+) -> Result<(), CommandError> {
+    persist_result?;
+    *current = next;
     Ok(())
 }
 
@@ -1226,6 +1450,14 @@ fn validate_batch_file_request(
             "目录批次文件路径不能为空",
         ));
     }
+    if matches!(request.action, DirectoryBatchFileAction::Skip)
+        != matches!(request.conflict_strategy, ConflictStrategy::Skip)
+    {
+        return Err(CommandError::new(
+            "DIRECTORY_BATCH_FILE_ACTION_INVALID",
+            "skip 动作必须与 skip 冲突策略一致",
+        ));
+    }
     match batch.direction {
         QueueDirection::Upload => {
             ensure_local_descendant(&batch.source_directory, &request.local_path)?;
@@ -1237,6 +1469,103 @@ fn validate_batch_file_request(
         }
     }
     Ok(())
+}
+
+fn file_action_counts(
+    scanned_file_count: usize,
+    requests: &[DirectoryBatchFileRequest],
+) -> Result<(usize, usize), CommandError> {
+    if requests.len() != scanned_file_count {
+        return Err(CommandError::new(
+            "DIRECTORY_BATCH_FILE_COUNT_MISMATCH",
+            "目录批次必须为每个扫描文件提交 transfer 或 skip 动作",
+        ));
+    }
+    let transfer_count = requests
+        .iter()
+        .filter(|request| request.action == DirectoryBatchFileAction::Transfer)
+        .count();
+    Ok((transfer_count, requests.len() - transfer_count))
+}
+
+fn batch_file_key(
+    batch: &SftpDirectoryBatch,
+    request: &DirectoryBatchFileRequest,
+) -> Result<String, CommandError> {
+    Ok(match batch.direction {
+        QueueDirection::Upload => format!(
+            "{}\n{}",
+            lexical_local_path(&request.local_path)?.to_string_lossy(),
+            normalize_remote(&request.remote_path)?
+        ),
+        QueueDirection::Download => format!(
+            "{}\n{}",
+            normalize_remote(&request.remote_path)?,
+            lexical_local_path(&request.local_path)?.to_string_lossy()
+        ),
+    })
+}
+
+fn validate_owned_write_directory(batch: &SftpDirectoryBatch) -> Result<(), CommandError> {
+    if !batch.owns_write_directory {
+        return Err(CommandError::new(
+            "DIRECTORY_BATCH_CLEANUP_UNOWNED",
+            "目录批次未声明拥有实际写入目录",
+        ));
+    }
+    let valid = match batch.direction {
+        QueueDirection::Upload => {
+            let target = normalize_remote(&batch.target_directory)?;
+            let write = normalize_remote(&batch.write_directory)?;
+            if batch.conflict_strategy == DirectoryConflictStrategy::Rename {
+                is_bound_renamed_remote_path(&target, &write)
+            } else {
+                target == write
+            }
+        }
+        QueueDirection::Download => {
+            let target = lexical_local_path(&batch.target_directory)?;
+            let write = lexical_local_path(&batch.write_directory)?;
+            if batch.conflict_strategy == DirectoryConflictStrategy::Rename {
+                is_bound_renamed_local_path(&target, &write)
+            } else {
+                target == write
+            }
+        }
+    };
+    if !valid {
+        return Err(CommandError::new(
+            "DIRECTORY_BATCH_CLEANUP_PATH_TAMPERED",
+            "目录批次实际写入路径与目标目录不匹配，已停止清理",
+        ));
+    }
+    Ok(())
+}
+
+fn is_bound_renamed_remote_path(target: &str, write: &str) -> bool {
+    let Some((target_parent, target_name)) = target.rsplit_once('/') else {
+        return false;
+    };
+    let Some((write_parent, write_name)) = write.rsplit_once('/') else {
+        return false;
+    };
+    write_parent == target_parent && is_numbered_rename(target_name, write_name)
+}
+
+fn is_bound_renamed_local_path(target: &Path, write: &Path) -> bool {
+    target.parent() == write.parent()
+        && target
+            .file_name()
+            .and_then(|value| value.to_str())
+            .zip(write.file_name().and_then(|value| value.to_str()))
+            .is_some_and(|(target_name, write_name)| is_numbered_rename(target_name, write_name))
+}
+
+fn is_numbered_rename(target_name: &str, write_name: &str) -> bool {
+    write_name
+        .strip_prefix(&format!("{target_name} ("))
+        .and_then(|value| value.strip_suffix(')'))
+        .is_some_and(|value| !value.is_empty() && value.chars().all(|char| char.is_ascii_digit()))
 }
 
 fn validate_relative_path(path: &str) -> Result<(), CommandError> {
@@ -1458,12 +1787,16 @@ mod tests {
             backup_path: None,
             task_ids: Vec::new(),
             file_count: 1,
+            transfer_count: 1,
+            skipped_count: 0,
             completed_count: 0,
             failed_count: 0,
             cancelled_count: 0,
             requires_commit: false,
             requires_rollback: false,
             cleanup_on_cancel: false,
+            enqueue_prepared: true,
+            owns_write_directory: false,
             commit_phase: DirectoryCommitPhase::Prepared,
             state,
             created_at: 1,
@@ -1517,6 +1850,27 @@ mod tests {
     }
 
     #[test]
+    fn prepared_parent_write_failure_keeps_the_persisted_replacement_intent() {
+        let mut initial = batch(DirectoryBatchState::Preparing);
+        initial.replacement_id = Some("directory-replacement-test".to_owned());
+        initial.replacement = Some(
+            remote_replacement_intent("server", "/target", "directory-replacement-test").unwrap(),
+        );
+        let mut current = vec![initial.clone()];
+        let mut prepared = initial;
+        prepared.state = DirectoryBatchState::Queued;
+        prepared.replacement = None;
+        let result = install_persisted_batches(
+            &mut current,
+            vec![prepared],
+            Err(CommandError::new("TEST_WRITE_FAILED", "simulated")),
+        );
+        assert_eq!(result.unwrap_err().code, "TEST_WRITE_FAILED");
+        assert!(current[0].replacement.is_some());
+        assert_eq!(current[0].state, DirectoryBatchState::Preparing);
+    }
+
+    #[test]
     fn completed_children_move_batch_to_committing() {
         let batch = batch(DirectoryBatchState::Running);
         assert_eq!(
@@ -1550,6 +1904,7 @@ mod tests {
             local_path: "C:\\other\\file.txt".to_owned(),
             remote_path: "/target/file.txt".to_owned(),
             conflict_strategy: ConflictStrategy::Overwrite,
+            action: DirectoryBatchFileAction::Transfer,
         };
         assert_eq!(
             validate_batch_file_request(&batch, &request)
@@ -1566,6 +1921,77 @@ mod tests {
         encoded["serverId"] = serde_json::Value::String("server-b".to_owned());
         let child: TransferQueueTask = serde_json::from_value(encoded).unwrap();
         assert!(!task_matches_batch(&batch, &child));
+    }
+
+    #[test]
+    fn missing_persisted_child_prevents_commit() {
+        let mut batch = batch(DirectoryBatchState::Running);
+        batch.file_count = 2;
+        batch.transfer_count = 2;
+        batch.task_ids = vec!["transfer-test".to_owned(), "transfer-missing".to_owned()];
+        let error =
+            validate_or_adopt_task_set(&mut batch, &[task(QueueTaskState::Completed)]).unwrap_err();
+        assert_eq!(error.code, "DIRECTORY_BATCH_TASK_SET_INCOMPLETE");
+    }
+
+    #[test]
+    fn preparing_crash_window_only_adopts_the_exact_prepared_set() {
+        let mut batch = batch(DirectoryBatchState::Preparing);
+        batch.file_count = 2;
+        batch.transfer_count = 1;
+        batch.skipped_count = 1;
+        batch.task_ids.clear();
+        validate_or_adopt_task_set(&mut batch, &[task(QueueTaskState::Queued)]).unwrap();
+        assert_eq!(batch.task_ids, vec!["transfer-test"]);
+
+        batch.task_ids.clear();
+        batch.transfer_count = 2;
+        assert_eq!(
+            validate_or_adopt_task_set(&mut batch, &[task(QueueTaskState::Queued)])
+                .unwrap_err()
+                .code,
+            "DIRECTORY_BATCH_TASK_SET_INCOMPLETE"
+        );
+    }
+
+    #[test]
+    fn every_scanned_file_requires_an_explicit_transfer_or_skip_action() {
+        let transfer = DirectoryBatchFileRequest {
+            local_path: "C:\\source\\one.txt".to_owned(),
+            remote_path: "/target/one.txt".to_owned(),
+            conflict_strategy: ConflictStrategy::Overwrite,
+            action: DirectoryBatchFileAction::Transfer,
+        };
+        let skipped = DirectoryBatchFileRequest {
+            local_path: "C:\\source\\two.txt".to_owned(),
+            remote_path: "/target/two.txt".to_owned(),
+            conflict_strategy: ConflictStrategy::Skip,
+            action: DirectoryBatchFileAction::Skip,
+        };
+        assert_eq!(
+            file_action_counts(2, &[transfer.clone(), skipped]).unwrap(),
+            (1, 1)
+        );
+        assert_eq!(
+            file_action_counts(2, &[transfer]).unwrap_err().code,
+            "DIRECTORY_BATCH_FILE_COUNT_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn backup_cleanup_failure_stays_retryable_without_rollback() {
+        assert_eq!(
+            classify_commit_failure("LOCAL_DIRECTORY_BACKUP_DELETE_FAILED"),
+            CommitFailureDisposition::RetryCleanup
+        );
+        assert_eq!(
+            classify_commit_failure("SFTP_DIRECTORY_BACKUP_DELETE_FAILED"),
+            CommitFailureDisposition::RetryCleanup
+        );
+        assert_eq!(
+            classify_commit_failure("LOCAL_DIRECTORY_REPLACEMENT_INVALID_STATE"),
+            CommitFailureDisposition::RequireRollback
+        );
     }
 
     #[test]

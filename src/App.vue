@@ -1120,6 +1120,7 @@ async function uploadDirectoryPath(
       localPath: string;
       remotePath: string;
       conflictStrategy: ConflictStrategy;
+      action: "transfer" | "skip";
     }> = [];
     for (const file of manifest.files) {
       const remotePath = joinRemotePath(batch.writeDirectory, file.relativePath);
@@ -1135,12 +1136,21 @@ async function uploadDirectoryPath(
           return false;
         }
         conflictStrategy = choice;
-        if (choice === "skip") continue;
+        if (choice === "skip") {
+          requests.push({
+            localPath: file.absolutePath,
+            remotePath,
+            conflictStrategy,
+            action: "skip",
+          });
+          continue;
+        }
       }
       requests.push({
         localPath: file.absolutePath,
         remotePath,
         conflictStrategy,
+        action: "transfer",
       });
     }
     batch = await enqueueDirectoryBatch(batch.batchId, requests);
@@ -1200,6 +1210,7 @@ async function downloadDirectoryItem(
       localPath: string;
       remotePath: string;
       conflictStrategy: ConflictStrategy;
+      action: "transfer" | "skip";
     }> = [];
     for (const file of manifest.files) {
       const localPath = joinLocalPath(batch.writeDirectory, file.relativePath);
@@ -1215,12 +1226,21 @@ async function downloadDirectoryItem(
           return false;
         }
         conflictStrategy = choice;
-        if (choice === "skip") continue;
+        if (choice === "skip") {
+          requests.push({
+            remotePath: file.remotePath,
+            localPath,
+            conflictStrategy,
+            action: "skip",
+          });
+          continue;
+        }
       }
       requests.push({
         remotePath: file.remotePath,
         localPath,
         conflictStrategy,
+        action: "transfer",
       });
     }
     batch = await enqueueDirectoryBatch(batch.batchId, requests);
@@ -1341,7 +1361,7 @@ function handleDirectoryBatchEvent(batch: SftpDirectoryBatch) {
 
 function directoryBatchProgress(batch: SftpDirectoryBatch) {
   if (!batch.fileCount) return batch.state === "completed" ? 100 : 0;
-  const finished = batch.completedCount + batch.failedCount + batch.cancelledCount;
+  const finished = batch.completedCount + batch.failedCount + batch.cancelledCount + batch.skippedCount;
   return Math.min(100, Math.round((finished / batch.fileCount) * 100));
 }
 
@@ -1350,7 +1370,10 @@ function directoryBatchStatusText(batch: SftpDirectoryBatch) {
   if (batch.state === "queued") return batch.sessionId ? "排队中" : "等待服务器重连";
   if (batch.state === "running") return `${directoryBatchProgress(batch)}%`;
   if (batch.state === "paused") return "已暂停";
-  if (batch.state === "committing") return batch.lastError ? "等待服务器重连" : "正在提交目录";
+  if (batch.state === "committing") {
+    if (batch.commitPhase === "cleanup_pending") return "等待清理备份";
+    return batch.lastError ? "等待服务器重连" : "正在提交目录";
+  }
   if (batch.state === "completed") return "完成";
   if (batch.state === "failed") return "失败";
   if (batch.state === "cancelled") return "已取消";
@@ -2055,15 +2078,16 @@ onBeforeUnmount(() => {
                 <small v-if="batch.lastError">{{ batch.lastError }}</small>
               </span>
               <div><i :style="{ width: `${directoryBatchProgress(batch)}%` }"></i></div>
-              <span>{{ batch.completedCount }}/{{ batch.fileCount }} 文件<span v-if="batch.failedCount"> · {{ batch.failedCount }} 失败</span></span>
+              <span>{{ batch.completedCount + batch.skippedCount }}/{{ batch.fileCount }} 文件<span v-if="batch.skippedCount"> · {{ batch.skippedCount }} 跳过</span><span v-if="batch.failedCount"> · {{ batch.failedCount }} 失败</span></span>
               <strong>{{ directoryBatchStatusText(batch) }}</strong>
               <button v-if="batch.state === 'queued' || batch.state === 'running'" @click="runDirectoryBatchAction(batch, pauseDirectoryBatch)">暂停</button>
               <button v-if="batch.state === 'paused'" @click="runDirectoryBatchAction(batch, resumeDirectoryBatch)">继续</button>
-              <button v-if="(batch.state === 'failed' || batch.state === 'cancelled') && batch.commitPhase !== 'rolled_back'" @click="runDirectoryBatchAction(batch, retryDirectoryBatch)">重试</button>
-              <button v-if="batch.state === 'queued' || batch.state === 'running' || batch.state === 'paused'" @click="cancelDirectoryBatchTask(batch, false)">取消并保留</button>
-              <button v-if="batch.state === 'queued' || batch.state === 'running' || batch.state === 'paused'" class="danger-button" @click="cancelDirectoryBatchTask(batch, true)">取消并删除断点</button>
+              <button v-if="(batch.state === 'failed' || batch.state === 'cancelled') && batch.commitPhase !== 'rolled_back' && batch.enqueuePrepared" @click="runDirectoryBatchAction(batch, retryDirectoryBatch)">重试</button>
+              <button v-if="batch.state === 'committing' && batch.commitPhase === 'cleanup_pending'" @click="runDirectoryBatchAction(batch, retryDirectoryBatch)">重试清理</button>
+              <button v-if="batch.state === 'queued' || batch.state === 'running' || batch.state === 'paused' || (batch.state === 'rollback_required' && batch.transferCount > 0)" @click="cancelDirectoryBatchTask(batch, false)">取消并保留</button>
+              <button v-if="batch.state === 'queued' || batch.state === 'running' || batch.state === 'paused' || (batch.state === 'rollback_required' && batch.transferCount > 0)" class="danger-button" @click="cancelDirectoryBatchTask(batch, true)">取消并删除断点</button>
               <button v-if="batch.requiresRollback || batch.state === 'rollback_required'" class="danger-button" @click="rollbackDirectoryBatchTask(batch)">恢复原目录</button>
-              <button v-if="(batch.state === 'completed' || batch.state === 'cancelled') && !batch.requiresRollback" @click="runDirectoryBatchAction(batch, deleteDirectoryBatch)">删除记录</button>
+              <button v-if="(batch.state === 'completed' || batch.state === 'cancelled' || batch.state === 'failed') && !batch.requiresCommit && !batch.requiresRollback" @click="runDirectoryBatchAction(batch, deleteDirectoryBatch)">删除记录</button>
             </div>
           </div>
           <div v-if="visibleStandaloneTransfers.length" class="transfer-queue">

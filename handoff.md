@@ -502,25 +502,37 @@ PR2 关键文件：
 核心数据：
 
 - `SftpDirectoryBatch`：包含 batch/server/session、方向、源/目标/实际写入目录、冲突策略、replacement、staging/backup、子任务 ID 与计数、commit/rollback 标记、阶段、错误和时间戳。
+- 新增持久化计数：`file_count` 为扫描总数，`transfer_count` 与 `skipped_count` 必须精确相加；`enqueue_prepared` 标记原子入队意图已落盘。
 - `TransferQueueTask.batch_id: Option<String>`：普通单文件为 `None`，目录子任务由后端写入父批次 ID。
 - 存储位置：Tauri 应用数据目录 `transfers/batches.json`，版本 1。
 - 单批上限：5000 文件；队列总上限保持 10000。
 
 恢复规则：
 
-- preparing 无子任务 → rollback_required；有已落盘子任务 → 通过 batch_id 重新关联。
+- preparing 未记录入队意图 → 按 replacement/owned-root 判断 failed 或 rollback_required；已记录意图 → 只接受数量完全一致的 batch_id 子任务集合。
 - queued → 等待同一后端验证 `server_id` 的会话。
 - running → 依据真实检查点转 paused 或 failed。
 - committing → 检查 target/staging/backup 组合后幂等继续。
 - 歧义状态、篡改路径或服务器身份不匹配 → rollback_required，不删除数据。
+- backup 仅清理失败 → committing/cleanup_pending，可重试清理，不允许回滚新目录。
+
+Code Review 阻塞项修复：
+
+- rollback 在删除前判定完整状态矩阵，歧义组合保持 target/staging/backup 不变。
+- replacement 完整路径意图在创建 staging 前持久化。
+- 父批次删除同步清理终态子任务；通用 clear 保留批次子任务。
+- 恢复时严格比较持久化 task ID 集合和 transfer 数量。
+- dispatch/worker terminal 候选快照写盘成功后才安装内存并通知父批次。
+- 无 replacement 的准备失败可安全解锁；批次拥有的写入根目录可经绑定校验后清理。
+- 所有扫描文件显式提交 transfer/skip 动作。
 
 已执行：
 
 - Node.js `24.16.0` 下 `npm ci` 通过。
 - `npm run check` 通过（Rust 格式、Clippy correctness/suspicious、Vue 类型检查）。
-- Rust 全量测试 53 项通过。
+- Rust 全量测试 65 项通过。
 - `npm run test:frontend` 29 项通过。
-- `npm run validate` 由用户在本地执行并报告通过（包含生产构建）。
+- 初始提交的 `npm run validate` 由用户执行并报告通过；Code Review 修复后的生产构建待重新执行。
 - 未执行真实远程写入测试。
 
 实机清单：
